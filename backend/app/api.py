@@ -9,7 +9,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.ai.providers import MockLLMProvider, OpenAILLMProvider
+from app.ai.providers import MockLLMProvider, OpenAILLMProvider, create_llm_provider
 from app.application import AssessmentService, LearningService
 from app.config import get_settings
 from app.curriculum import B1_COURSE
@@ -230,6 +230,11 @@ async def interview_practice(user: User = Depends(current_user)) -> dict:
 
 @router.post("/tutor/stream")
 async def tutor_stream(data: TutorRequest, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)) -> StreamingResponse:
+    settings = get_settings()
+    try:
+        provider = create_llm_provider(settings.llm_provider, settings.llm_api_key, settings.llm_model)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
     session = await db.get(ConversationSession, data.session_id) if data.session_id else None
     if session and session.user_id != user.id:
         raise HTTPException(404, "Conversation not found")
@@ -244,13 +249,11 @@ async def tutor_stream(data: TutorRequest, user: User = Depends(current_user), d
     provider_messages.append({"role":"user","content":data.message})
     db.add(ConversationMessage(session_id=session.id, role="user", content=data.message))
     await db.commit()
-    settings = get_settings()
-    provider = OpenAILLMProvider(settings.llm_api_key, settings.llm_model) if settings.llm_provider == "openai" and settings.llm_api_key else MockLLMProvider()
     session_id = session.id
 
     async def events():
         chunks: list[str] = []
-        yield f"event: meta\ndata: {json.dumps({'session_id': session_id})}\n\n"
+        yield f"event: meta\ndata: {json.dumps({'session_id': session_id, 'provider': settings.llm_provider, 'model': settings.llm_model})}\n\n"
         try:
             async for chunk in provider.stream(provider_messages):
                 chunks.append(chunk)
@@ -258,11 +261,14 @@ async def tutor_stream(data: TutorRequest, user: User = Depends(current_user), d
             async with db.begin():
                 db.add(ConversationMessage(session_id=session_id, role="assistant", content="".join(chunks)))
             blocks = MockLLMProvider().tutor_response(data.message).ui_blocks
-            yield f"event: done\ndata: {json.dumps({'ui_blocks': [b.model_dump() for b in blocks], 'suggested_actions':['Give a concrete example','Practice an interview answer']})}\n\n"
+            usage = provider.last_usage if isinstance(provider, OpenAILLMProvider) else {}
+            response_id = provider.last_response_id if isinstance(provider, OpenAILLMProvider) else None
+            yield f"event: done\ndata: {json.dumps({'ui_blocks': [b.model_dump() for b in blocks], 'suggested_actions':['Give a concrete example','Practice an interview answer'], 'provider':settings.llm_provider, 'model':settings.llm_model, 'response_id':response_id, 'usage':usage})}\n\n"
         except asyncio.CancelledError:
             return
         except Exception:
-            yield f"event: error\ndata: {json.dumps({'message':'The tutor could not respond. Please retry.'})}\n\n"
+            message = "OpenAI could not answer. Check the API key, billing, model access, and backend logs." if isinstance(provider, OpenAILLMProvider) else "The tutor could not respond. Please retry."
+            yield f"event: error\ndata: {json.dumps({'message':message})}\n\n"
     return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no"})
 
 

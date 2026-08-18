@@ -55,5 +55,9 @@ async def unexpected_error(_: Request, __: Exception) -> JSONResponse:
 
 @app.get("/health")
 async def health() -> dict:
-    return {"status":"ok","ai_provider":settings.llm_provider}
-
+    return {
+        "status":"ok",
+        "ai_provider":settings.llm_provider,
+        "ai_model":settings.llm_model,
+        "ai_ready":settings.llm_provider.casefold() == "mock" or bool(settings.llm_api_key),
+    }

@@ -95,6 +95,8 @@ class OpenAILLMProvider:
         from openai import AsyncOpenAI
         self.client = AsyncOpenAI(api_key=api_key)
         self.model = model
+        self.last_response_id: str | None = None
+        self.last_usage: dict[str, int] = {}
 
     async def generate(self, messages: list[dict[str, str]], **kwargs: Any) -> str:
         response = await self.client.responses.create(model=self.model, input=messages, **kwargs)
@@ -109,3 +111,24 @@ class OpenAILLMProvider:
         async for event in stream:
             if event.type == "response.output_text.delta":
                 yield event.delta
+            elif event.type == "response.completed":
+                response = event.response
+                self.last_response_id = response.id
+                usage = response.usage
+                if usage:
+                    self.last_usage = {
+                        "input_tokens": usage.input_tokens,
+                        "output_tokens": usage.output_tokens,
+                        "total_tokens": usage.total_tokens,
+                    }
+
+
+def create_llm_provider(provider: str, api_key: str, model: str) -> LLMProvider:
+    normalized = provider.strip().casefold()
+    if normalized == "openai":
+        if not api_key.strip():
+            raise ValueError("OpenAI API key is not configured. Set LLM_API_KEY or OPENAI_API_KEY on the backend.")
+        return OpenAILLMProvider(api_key, model)
+    if normalized == "mock":
+        return MockLLMProvider()
+    raise ValueError(f"Unsupported LLM provider: {provider}")

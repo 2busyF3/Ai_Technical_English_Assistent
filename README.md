@@ -85,7 +85,7 @@ The application is served at `http://localhost:5173`; the Docker API is at `http
 | `REDIS_URL` | Dramatiq/Redis URL | `redis://localhost:6379/0` |
 | `SECRET_KEY` | JWT signing secret | development-only value |
 | `ACCESS_TOKEN_MINUTES` | Session lifetime | `1440` |
-| `LLM_PROVIDER` | `mock` or `openai` | `mock` |
+| `LLM_PROVIDER` | `openai` or explicit test-only `mock` | `openai` |
 | `LLM_API_KEY` | Server-side provider credential | empty |
 | `LLM_MODEL` | Task model | `gpt-5-mini` |
 | `EMBEDDING_MODEL` | Embedding model name | `text-embedding-3-small` |
@@ -105,7 +105,13 @@ LLM_API_KEY=your-server-side-key
 LLM_MODEL=gpt-5-mini
 ```
 
-The application will then use the OpenAI Responses API implementation of `LLMProvider`. `MockLLMProvider` remains available for deterministic tests and offline demos.
+The application will then use the OpenAI Responses API implementation of `LLMProvider`. When `openai` is selected but the key is missing, the tutor returns a clear configuration error and never silently falls back to scripted replies. `MockLLMProvider` remains available only when `LLM_PROVIDER=mock` is explicitly selected for deterministic tests.
+
+After recreating the backend container, verify a paid API call and reported token usage:
+
+```powershell
+.\scripts\openai-smoke.ps1
+```
 
 ## Database, seed, and knowledge ingestion
 

@@ -1,7 +1,9 @@
 from datetime import datetime, timezone
 
+import pytest
+
 from app.ai.context import ContextBuilder, TutorContext
-from app.ai.providers import MockLLMProvider
+from app.ai.providers import MockLLMProvider, OpenAILLMProvider, create_llm_provider
 from app.domain.learning import MasteryService, PlacementEngine, PriorityInput, PersonalizationEngine, SRSService, SRSState, VocabularyReviewService
 from app.rag.retrieval import Candidate, HybridRetriever, RetrievalQuery
 from app.application import AssessmentService, LearningService
@@ -114,3 +116,10 @@ async def test_mock_tutor_corrects_grammar_and_keeps_topic_context() -> None:
         {"role":"user","content":"How are they different?"},
     ])]
     assert "Authentication" in "".join(chunks)
+
+
+def test_openai_provider_never_silently_falls_back_to_mock() -> None:
+    with pytest.raises(ValueError, match="API key is not configured"):
+        create_llm_provider("openai", "", "gpt-5-mini")
+    assert isinstance(create_llm_provider("openai", "test-key", "gpt-5-mini"), OpenAILLMProvider)
+    assert isinstance(create_llm_provider("mock", "", "gpt-5-mini"), MockLLMProvider)

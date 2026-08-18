@@ -1,6 +1,6 @@
 from functools import lru_cache
 
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -12,8 +12,8 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
     secret_key: str = "development-only-secret-change-me"
     access_token_minutes: int = 1440
-    llm_provider: str = "mock"
-    llm_api_key: str = ""
+    llm_provider: str = "openai"
+    llm_api_key: str = Field(default="", validation_alias=AliasChoices("LLM_API_KEY", "OPENAI_API_KEY"))
     llm_model: str = "gpt-5-mini"
     embedding_model: str = "text-embedding-3-small"
     cors_origins: str = "http://localhost:5173"
@@ -27,4 +27,3 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
-
