@@ -1,9 +1,10 @@
 from datetime import datetime, timezone
 
 from app.ai.context import ContextBuilder, TutorContext
+from app.ai.providers import MockLLMProvider
 from app.domain.learning import MasteryService, PlacementEngine, PriorityInput, PersonalizationEngine, SRSService, SRSState, VocabularyReviewService
 from app.rag.retrieval import Candidate, HybridRetriever, RetrievalQuery
-from app.application import LearningService
+from app.application import AssessmentService, LearningService
 from app.models import LessonSession
 
 
@@ -46,6 +47,26 @@ def test_placement_converges_and_has_upper_limit() -> None:
     assert done and ability > .5 and confidence >= .7
 
 
+def test_placement_requires_all_dimensions_and_calibrates_cefr() -> None:
+    engine = PlacementEngine()
+    ability, confidence = .5, .1
+    for count in range(engine.max_questions - 1):
+        ability, confidence, done = engine.update(ability, confidence, 1, .55, count)
+        assert not done
+    _, _, done = engine.update(ability, confidence, 1, .55, engine.max_questions - 1)
+    assert done
+    assert engine.cefr(.15) == "A1"
+    assert engine.cefr(.58) == "B1"
+    assert engine.cefr(.93) == "C1"
+
+
+def test_open_placement_answers_reward_structure_not_keyword_spam() -> None:
+    weak = AssessmentService._score_text("api api api")
+    strong = AssessmentService._score_text("Yesterday I identified a database query bottleneck and reduced API latency.")
+    assert weak < .5
+    assert strong > .8
+
+
 def test_context_builder_limits_history_and_budget() -> None:
     context = TutorContext("B1 backend developer","Interview",["articles"],["latency"],[{"role":"user","content":str(i)} for i in range(20)],["knowledge"])
     output = ContextBuilder(max_chars=500,recent_message_limit=3).build(context)
@@ -70,6 +91,8 @@ def test_lesson_replays_failed_exercise_after_initial_pass() -> None:
     payload = LearningService.lesson_payload(lesson)
     assert payload["total_steps"] == 4
     assert payload["exercise"]["is_review"] is True
+    lesson.status = "completed"
+    assert LearningService.lesson_payload(lesson)["total_steps"] == 4
 
 
 def test_vocabulary_review_requires_recall_and_real_context() -> None:
@@ -77,3 +100,17 @@ def test_vocabulary_review_requires_recall_and_real_context() -> None:
     failed = VocabularyReviewService.evaluate("latency", "throughput", "The production API was slow yesterday.")
     assert successful.recall_correct and successful.context_correct and successful.quality >= 4
     assert not failed.recall_correct and not failed.context_correct and failed.quality == 1
+
+
+async def test_mock_tutor_corrects_grammar_and_keeps_topic_context() -> None:
+    provider = MockLLMProvider()
+    correction = provider._reply("I have deployed the fix yesterday")
+    assert "I deployed the fix yesterday" in correction
+    chunks = [chunk async for chunk in provider.stream([
+        {"role":"user","content":"I have deployed the fix yesterday."},
+        {"role":"assistant","content":"Use Past Simple."},
+        {"role":"user","content":"Explain authentication and authorization."},
+        {"role":"assistant","content":"They cover identity and permissions."},
+        {"role":"user","content":"How are they different?"},
+    ])]
+    assert "Authentication" in "".join(chunks)

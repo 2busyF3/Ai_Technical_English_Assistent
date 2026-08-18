@@ -8,9 +8,9 @@ The core design rule is: **AI controls the learning experience; the application 
 
 - Email/password registration with Argon2 hashing and JWT sessions
 - Five-step professional onboarding
-- Adaptive placement test with separate skill dimensions and a confidence stop condition
+- Seven-dimension placement test with calibrated CEFR thresholds
 - Persisted learner profile, skill states, weekly plan, mastery, and streak
-- Personalized daily dashboard and multi-skill backend lesson
+- Personalized dashboard and a four-module B1 backend course with end-of-lesson error review
 - Structured answer evaluation and persistent recurring-error aggregation
 - Streaming Technical English tutor over SSE, with cancellation, retry, and safe typed UI blocks
 - Technical vocabulary with collocations, examples, mistakes, search, and SM-2-inspired review state
@@ -135,10 +135,12 @@ mypy app
 
 cd ../frontend
 npm run build
-npm run lint
+
+cd ..
+powershell -File scripts/acceptance.ps1
 ```
 
-Tests do not call a paid AI provider. They cover personalization priority, prerequisite readiness, mastery updates, SRS scheduling, placement convergence, context budgets, curriculum references, and seed collocations.
+Tests do not call a paid AI provider. They cover personalization priority, prerequisite readiness, mastery updates, SRS scheduling, placement calibration, tutor context, curriculum retries, and vocabulary scoring. The acceptance script creates a fresh learner through the running Docker application, completes the full B1 course through correct and incorrect branches, checks progress, reviews vocabulary, and holds a multi-turn tutor conversation.
 
 ## Deliberately deferred
 

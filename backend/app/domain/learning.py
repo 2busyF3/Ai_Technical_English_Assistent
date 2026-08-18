@@ -84,10 +84,10 @@ class PlacementEngine:
         expected = 1 / (1 + exp(-5 * (ability - difficulty)))
         new_ability = min(0.98, max(0.02, ability + learning_rate * (score - expected)))
         new_confidence = min(0.95, confidence + 0.13 + abs(score - expected) * 0.03)
-        done = count + 1 >= self.max_questions or (count + 1 >= 5 and new_confidence >= 0.78)
+        done = count + 1 >= self.max_questions
         return round(new_ability, 4), round(new_confidence, 4), done
 
     @staticmethod
     def cefr(ability: float) -> str:
-        levels = ["A1", "A2", "B1", "B2", "C1", "C2"]
-        return levels[min(5, int(ability * 6))]
+        thresholds = ((0.25, "A1"), (0.42, "A2"), (0.62, "B1"), (0.78, "B2"), (0.97, "C1"))
+        return next((level for ceiling, level in thresholds if ability < ceiling), "C2")

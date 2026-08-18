@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.ai.providers import MockLLMProvider, OpenAILLMProvider
 from app.application import AssessmentService, LearningService
 from app.config import get_settings
+from app.curriculum import B1_COURSE
 from app.database import get_db
 from app.models import (
     Assessment,
@@ -114,7 +115,10 @@ async def dashboard(user: User = Depends(current_user), db: AsyncSession = Depen
 @router.get("/learning-plan")
 async def learning_plan(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)) -> dict:
     plan = await db.scalar(select(LearningPlan).where(LearningPlan.user_id == user.id).order_by(LearningPlan.created_at.desc()))
-    return {"title":plan.title if plan else "Your personalized plan","week":plan.week_number if plan else 1,"focus":plan.focus if plan else [],"days":[{"day":"Monday","topic":"API performance","mode":"Interview","minutes":20,"done":True},{"day":"Tuesday","topic":"Past time in status updates","mode":"Stand-up","minutes":15,"done":False},{"day":"Wednesday","topic":"Caching & Redis","mode":"Technical explanation","minutes":20,"done":False},{"day":"Thursday","topic":"Vocabulary review","mode":"SRS","minutes":10,"done":False},{"day":"Friday","topic":"Backend mock interview","mode":"Roleplay","minutes":25,"done":False}]}
+    completed = (await db.scalars(select(LessonSession).where(LessonSession.user_id == user.id, LessonSession.status == "completed"))).all()
+    completed_keys = {lesson.summary.get("course_key") for lesson in completed if lesson.summary}
+    days = [{"day":f"Module {index + 1}","topic":course["title"],"mode":course["objective"],"minutes":course["duration"],"done":course["key"] in completed_keys} for index, course in enumerate(B1_COURSE)]
+    return {"title":plan.title if plan else "B1 Technical English Core","week":plan.week_number if plan else 1,"focus":plan.focus if plan else ["Deployment updates","API explanations","Team communication"],"level":"B1","completed":len(completed_keys & {course['key'] for course in B1_COURSE}),"total":len(B1_COURSE),"days":days}
 
 
 @router.post("/lessons/start")
@@ -186,6 +190,8 @@ async def progress(user: User = Depends(current_user), db: AsyncSession = Depend
         grouped.setdefault(skill.category, []).append(state.mastery)
     profile = await db.scalar(select(LearnerProfile).where(LearnerProfile.user_id == user.id))
     completed_lessons = (await db.scalars(select(LessonSession).where(LessonSession.user_id == user.id, LessonSession.status == "completed"))).all()
+    completed_course_keys = {lesson.summary.get("course_key") for lesson in completed_lessons if lesson.summary}
+    completed_course_modules = len(completed_course_keys & {course["key"] for course in B1_COURSE})
     vocabulary_reviews = await db.scalar(select(func.coalesce(func.sum(UserVocabularyState.repetitions), 0)).where(UserVocabularyState.user_id == user.id)) or 0
     today = datetime.now(timezone.utc).date()
     activity = []
@@ -201,7 +207,9 @@ async def progress(user: User = Depends(current_user), db: AsyncSession = Depend
         achievements.append("Backend vocabulary starter")
     if len(completed_lessons) >= 3:
         achievements.append("Three lessons completed")
-    return {"categories":[{"name":name.replace("_", " ").title(),"progress":round(sum(values)/len(values)*100)} for name,values in grouped.items()],"activity":activity,"activity_labels":activity_labels,"achievements":achievements,"level":profile.estimated_cefr if profile else "B1","target":profile.target_cefr if profile else "B2","streak":profile.streak if profile else 0,"completed_lessons":len(completed_lessons),"vocabulary_reviews":int(vocabulary_reviews)}
+    if completed_course_modules == len(B1_COURSE):
+        achievements.append("B1 core course completed")
+    return {"categories":[{"name":name.replace("_", " ").title(),"progress":round(sum(values)/len(values)*100)} for name,values in grouped.items()],"activity":activity,"activity_labels":activity_labels,"achievements":achievements,"level":profile.estimated_cefr if profile else "B1","target":profile.target_cefr if profile else "B2","streak":profile.streak if profile else 0,"completed_lessons":len(completed_lessons),"course_completed":completed_course_modules,"course_total":len(B1_COURSE),"vocabulary_reviews":int(vocabulary_reviews)}
 
 
 @router.get("/skills")
@@ -229,6 +237,11 @@ async def tutor_stream(data: TutorRequest, user: User = Depends(current_user), d
         session = ConversationSession(user_id=user.id, mode=data.mode, title="Backend English practice")
         db.add(session)
         await db.flush()
+    history = list((await db.scalars(select(ConversationMessage).where(ConversationMessage.session_id == session.id).order_by(ConversationMessage.created_at.desc()).limit(10))).all())
+    history.reverse()
+    provider_messages = [{"role":"system","content":"You are a supportive Technical English tutor. Keep conversational context, correct high-value language errors explicitly, and use backend examples."}]
+    provider_messages.extend({"role":message.role,"content":message.content} for message in history)
+    provider_messages.append({"role":"user","content":data.message})
     db.add(ConversationMessage(session_id=session.id, role="user", content=data.message))
     await db.commit()
     settings = get_settings()
@@ -239,7 +252,7 @@ async def tutor_stream(data: TutorRequest, user: User = Depends(current_user), d
         chunks: list[str] = []
         yield f"event: meta\ndata: {json.dumps({'session_id': session_id})}\n\n"
         try:
-            async for chunk in provider.stream([{"role":"system","content":"You are a supportive Technical English tutor. Keep flow, focus on high-value corrections, and use backend examples."},{"role":"user","content":data.message}]):
+            async for chunk in provider.stream(provider_messages):
                 chunks.append(chunk)
                 yield f"event: token\ndata: {json.dumps({'token': chunk})}\n\n"
             async with db.begin():

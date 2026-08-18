@@ -47,9 +47,51 @@ PLACEMENT_ITEMS = [
     {"key":"professional-1","dimension":"professional_communication","difficulty":.68,"type":"text","prompt":"Tell an interviewer how you have improved API performance in a previous project.","answer":""},
 ]
 
-LESSON_EXERCISES = [
-    {"type":"MULTIPLE_CHOICE","prompt":"Which sentence sounds natural in a deployment update?","options":["We deployed to production this morning.","We deployed on production this morning.","We have deploy to production."],"answer":"We deployed to production this morning."},
-    {"type":"ERROR_CORRECTION","prompt":"Correct this sentence: “I've reduced the API latency yesterday.”","answer":"I reduced the API latency yesterday."},
-    {"type":"TECHNICAL_INTERVIEW","prompt":"Imagine you're in a backend interview. Explain what you did in a previous project to reduce API latency. Use at least two of: throughput, bottleneck, caching, query.","answer":""},
+B1_COURSE = [
+    {
+        "key":"deployment-updates","title":"Clear Deployment Updates","skill_id":"tech.deployment","duration":20,
+        "objective":"Report completed deployments and rollbacks with accurate Past Simple and deployment collocations.",
+        "context":"You are updating your team after a production release.",
+        "exercises":[
+            {"type":"MULTIPLE_CHOICE","prompt":"Which sentence sounds natural in a deployment update?","options":["We deployed to production this morning.","We deployed on production this morning.","We have deploy to production."],"answer":"We deployed to production this morning.","error_type":"incorrect-preposition","explanation":"Use ‘deploy to production’ as the standard IT collocation."},
+            {"type":"ERROR_CORRECTION","prompt":"Correct this sentence: “I've deployed the fix yesterday.”","answer":"I deployed the fix yesterday.","error_type":"present-perfect-vs-past-simple","explanation":"Use Past Simple with a finished time marker such as ‘yesterday’."},
+            {"type":"WORK_UPDATE","prompt":"Write a short release update. Say what you deployed, what happened, and whether a rollback was needed.","answer":"","rubric_terms":["deploy","rollback"],"error_type":"deployment-update-clarity","explanation":"A useful release update states the action, result, and rollback status."},
+        ],
+        "summary":{"strong":["Deployment collocations","Past Simple updates"],"needs_work":["Finished time markers","Release outcomes"],"new_words":["deploy","rollback","breaking change"],"next_topic":"REST API explanations"},
+    },
+    {
+        "key":"rest-explanations","title":"Explaining REST API Behavior","skill_id":"tech.rest","duration":20,
+        "objective":"Explain endpoint behavior using precise HTTP and payload vocabulary.",
+        "context":"You are documenting an endpoint for another backend team.",
+        "exercises":[
+            {"type":"MULTIPLE_CHOICE","prompt":"Which sentence describes a missing API resource precisely?","options":["The endpoint returns 404 when the resource does not exist.","The endpoint throws 404 when resource not exist.","The API is making a missing."],"answer":"The endpoint returns 404 when the resource does not exist.","error_type":"api-description-grammar","explanation":"Use ‘returns 404’ and a complete when-clause."},
+            {"type":"ERROR_CORRECTION","prompt":"Correct this sentence: “The request payload contain user data.”","answer":"The request payload contains user data.","error_type":"subject-verb-agreement","explanation":"A singular subject such as ‘payload’ takes ‘contains’."},
+            {"type":"TECHNICAL_EXPLANATION","prompt":"Explain why an idempotent request is safe to retry. Mention the request and its result.","answer":"","rubric_terms":["idempotent","request","result"],"error_type":"rest-explanation-clarity","explanation":"Define the property and connect it to the result of repeating a request."},
+        ],
+        "summary":{"strong":["HTTP vocabulary","Endpoint descriptions"],"needs_work":["Subject–verb agreement","Cause and result"],"new_words":["payload","idempotency","rate limiting"],"next_topic":"Authentication and authorization"},
+    },
+    {
+        "key":"auth-explanations","title":"Authentication vs Authorization","skill_id":"tech.auth","duration":20,
+        "objective":"Distinguish identity verification from access control in clear technical English.",
+        "context":"You are explaining an access-control design during a code review.",
+        "exercises":[
+            {"type":"MULTIPLE_CHOICE","prompt":"What does authorization determine?","options":["What an authenticated user may access.","Whether the password is correctly typed.","How quickly the API responds."],"answer":"What an authenticated user may access.","error_type":"auth-concept-confusion","explanation":"Authentication verifies identity; authorization determines permissions."},
+            {"type":"ERROR_CORRECTION","prompt":"Correct this sentence: “The user don't have permission to access this endpoint.”","answer":"The user doesn't have permission to access this endpoint.","error_type":"third-person-agreement","explanation":"Use ‘doesn’t’ with the third-person singular subject ‘user’."},
+            {"type":"TECHNICAL_EXPLANATION","prompt":"Compare authentication and authorization in two sentences. Mention identity, permissions, and access.","answer":"","rubric_terms":["identity","permission","access"],"error_type":"auth-explanation-clarity","explanation":"A complete comparison covers identity first and permissions or access second."},
+        ],
+        "summary":{"strong":["Security terminology","Technical comparisons"],"needs_work":["Third-person agreement","Contrast markers"],"new_words":["identity","permission","access control"],"next_topic":"Daily stand-up communication"},
+    },
+    {
+        "key":"standup-communication","title":"Effective Daily Stand-ups","skill_id":"professional.standup","duration":15,
+        "objective":"Give a concise update about completed work, today’s plan, and blockers.",
+        "context":"You have sixty seconds to update an international engineering team.",
+        "exercises":[
+            {"type":"MULTIPLE_CHOICE","prompt":"Which opening clearly reports completed work?","options":["Yesterday I fixed the connection-pool issue.","Yesterday I have fix connection pool.","Yesterday I am fixing it."],"answer":"Yesterday I fixed the connection-pool issue.","error_type":"standup-past-simple","explanation":"Use Past Simple for work completed yesterday."},
+            {"type":"ERROR_CORRECTION","prompt":"Correct this sentence: “Today I working on the monitoring dashboard.”","answer":"Today I am working on the monitoring dashboard.","error_type":"missing-auxiliary","explanation":"Present Continuous needs the auxiliary verb ‘am’ with ‘I’."},
+            {"type":"PROFESSIONAL_COMMUNICATION","prompt":"Write a three-part stand-up update: yesterday’s result, today’s plan, and your blocker or say that you have none.","answer":"","rubric_terms":["yesterday","today","blocker"],"error_type":"standup-structure","explanation":"A complete stand-up separates completed work, the next action, and blockers."},
+        ],
+        "summary":{"strong":["Concise updates","Past and present time frames"],"needs_work":["Auxiliary verbs","Explicit blockers"],"new_words":["blocker","connection pool","monitoring"],"next_topic":"B1 consolidation review"},
+    },
 ]
 
+LESSON_EXERCISES = B1_COURSE[0]["exercises"]

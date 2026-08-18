@@ -31,8 +31,7 @@ class TTSProvider(Protocol):
 
 class MockLLMProvider:
     async def generate(self, messages: list[dict[str, str]], **kwargs: Any) -> str:
-        user_text = messages[-1]["content"] if messages else ""
-        return self._reply(user_text)
+        return self._reply_with_context(messages)
 
     async def generate_structured(self, messages: list[dict[str, str]], schema: type[T], **kwargs: Any) -> T:
         if schema is EvaluationResult:
@@ -44,13 +43,15 @@ class MockLLMProvider:
         return schema.model_validate({})
 
     async def stream(self, messages: list[dict[str, str]], **kwargs: Any) -> AsyncIterator[str]:
-        for word in self._reply(messages[-1]["content"]).split(" "):
+        for word in self._reply_with_context(messages).split(" "):
             await asyncio.sleep(.018)
             yield word + " "
 
     @staticmethod
     def _reply(text: str) -> str:
         lowered = text.lower()
+        if ("i have deployed" in lowered or "i've deployed" in lowered) and "yesterday" in lowered:
+            return "Use Past Simple with a finished time marker: ‘I deployed the fix yesterday,’ not ‘I have deployed yesterday.’ Now add the deployment result and whether a rollback was needed."
         if "authentication" in lowered or "authorization" in lowered:
             return "Good distinction to practise. Authentication answers ‘Who are you?’, while authorization answers ‘What are you allowed to do?’. Now give me a concrete API example using both terms."
         if "latency" in lowered or "performance" in lowered:
@@ -58,6 +59,23 @@ class MockLLMProvider:
         if "deploy" in lowered or "production" in lowered:
             return "Nice. In team communication, say ‘deploy to production’ rather than ‘deploy on production’. Tell me what checks you completed before the release and how you would roll it back."
         return "Let’s turn that into precise technical English. Start with the context, name the technical decision, and explain its impact. Can you add one measurable detail and one trade-off?"
+
+    @classmethod
+    def _reply_with_context(cls, messages: list[dict[str, str]]) -> str:
+        user_messages = [message["content"] for message in messages if message.get("role") == "user"]
+        if not user_messages:
+            return cls._reply("")
+        current = user_messages[-1]
+        lowered = current.casefold()
+        explicit_topic = any(term in lowered for term in ("authentication", "authorization", "latency", "performance", "deploy", "production"))
+        grammar_error = ("i have deployed" in lowered or "i've deployed" in lowered) and "yesterday" in lowered
+        if explicit_topic or grammar_error:
+            return cls._reply(current)
+        for previous in reversed(user_messages[:-1]):
+            previous_lowered = previous.casefold()
+            if any(term in previous_lowered for term in ("authentication", "authorization", "latency", "performance", "deploy", "production")):
+                return cls._reply(f"{previous} {current}")
+        return cls._reply(current)
 
     def tutor_response(self, text: str) -> TutorResponse:
         reply = self._reply(text)
@@ -91,4 +109,3 @@ class OpenAILLMProvider:
         async for event in stream:
             if event.type == "response.output_text.delta":
                 yield event.delta
-
