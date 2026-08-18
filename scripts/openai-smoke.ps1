@@ -39,7 +39,7 @@ if (-not ([string]$done.response_id).StartsWith('resp_')) { throw 'OpenAI respon
 if ([int]$done.usage.total_tokens -le 0) { throw 'OpenAI token usage is missing.' }
 if (($tokens -join '').Length -lt 20) { throw 'OpenAI returned an empty tutor response.' }
 
-[pscustomobject]@{
+$result = [pscustomobject]@{
     provider = $done.provider
     model = $done.model
     response_id = $done.response_id
@@ -47,4 +47,8 @@ if (($tokens -join '').Length -lt 20) { throw 'OpenAI returned an empty tutor re
     output_tokens = $done.usage.output_tokens
     total_tokens = $done.usage.total_tokens
     marker_returned = ($tokens -join '') -match $nonce
-} | ConvertTo-Json
+}
+Invoke-RestMethod -Method Delete -Uri "$BaseUrl/me" -Headers $headers -ContentType application/json -Body (@{
+    password = 'OpenAISmoke123!'
+} | ConvertTo-Json) | Out-Null
+$result | ConvertTo-Json

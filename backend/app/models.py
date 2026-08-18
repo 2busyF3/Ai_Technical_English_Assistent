@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+from pgvector.sqlalchemy import Vector
 
 from app.database import Base
 
@@ -25,16 +26,29 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(String(255))
     display_name: Mapped[str] = mapped_column(String(80), default="Learner")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     profile: Mapped[LearnerProfile | None] = relationship(back_populates="user", cascade="all, delete-orphan")
+
+
+class RefreshToken(Base):
+    __tablename__ = "refresh_tokens"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    family_id: Mapped[str] = mapped_column(String(36), index=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
 class LearnerProfile(Base):
     __tablename__ = "learner_profiles"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
-    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), unique=True, index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), unique=True, index=True)
     native_language: Mapped[str] = mapped_column(String(40), default="Russian")
     interface_language: Mapped[str] = mapped_column(String(10), default="en")
+    native_explanations: Mapped[bool] = mapped_column(Boolean, default=True)
     estimated_cefr: Mapped[str] = mapped_column(String(4), default="B1")
     target_cefr: Mapped[str] = mapped_column(String(4), default="B2")
     specialization: Mapped[str] = mapped_column(String(40), default="BACKEND")
@@ -48,6 +62,7 @@ class LearnerProfile(Base):
     onboarding_completed: Mapped[bool] = mapped_column(Boolean, default=False)
     placement_completed: Mapped[bool] = mapped_column(Boolean, default=False)
     streak: Mapped[int] = mapped_column(Integer, default=0)
+    last_learning_date: Mapped[date | None] = mapped_column(Date)
     total_minutes: Mapped[int] = mapped_column(Integer, default=0)
     user: Mapped[User] = relationship(back_populates="profile")
 
@@ -75,7 +90,7 @@ class UserSkillState(Base):
     __tablename__ = "user_skill_states"
     __table_args__ = (UniqueConstraint("user_id", "skill_id"),)
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
-    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     skill_id: Mapped[str] = mapped_column(ForeignKey("skills.id"), index=True)
     mastery: Mapped[float] = mapped_column(Float, default=0.35)
     confidence: Mapped[float] = mapped_column(Float, default=0.2)
@@ -86,7 +101,7 @@ class UserSkillState(Base):
 class Assessment(Base):
     __tablename__ = "assessments"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
-    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     status: Mapped[str] = mapped_column(String(20), default="active")
     ability: Mapped[float] = mapped_column(Float, default=0.5)
     confidence: Mapped[float] = mapped_column(Float, default=0.1)
@@ -97,8 +112,9 @@ class Assessment(Base):
 
 class AssessmentAttempt(Base):
     __tablename__ = "assessment_attempts"
+    __table_args__ = (UniqueConstraint("assessment_id", "item_key"),)
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
-    assessment_id: Mapped[str] = mapped_column(ForeignKey("assessments.id"), index=True)
+    assessment_id: Mapped[str] = mapped_column(ForeignKey("assessments.id", ondelete="CASCADE"), index=True)
     item_key: Mapped[str] = mapped_column(String(80))
     answer: Mapped[str] = mapped_column(Text)
     score: Mapped[float] = mapped_column(Float)
@@ -108,7 +124,7 @@ class AssessmentAttempt(Base):
 class LearningPlan(Base):
     __tablename__ = "learning_plans"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
-    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     title: Mapped[str] = mapped_column(String(140))
     focus: Mapped[list[str]] = mapped_column(JSON, default=list)
     week_number: Mapped[int] = mapped_column(Integer, default=1)
@@ -118,7 +134,7 @@ class LearningPlan(Base):
 class LessonSession(Base):
     __tablename__ = "lesson_sessions"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
-    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     skill_id: Mapped[str] = mapped_column(ForeignKey("skills.id"))
     title: Mapped[str] = mapped_column(String(160))
     status: Mapped[str] = mapped_column(String(20), default="active")
@@ -133,7 +149,7 @@ class UserError(Base):
     __tablename__ = "user_errors"
     __table_args__ = (UniqueConstraint("user_id", "error_type", "skill_id"),)
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
-    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     error_type: Mapped[str] = mapped_column(String(70))
     skill_id: Mapped[str] = mapped_column(String(90))
     original_fragment: Mapped[str] = mapped_column(Text)
@@ -165,7 +181,7 @@ class UserVocabularyState(Base):
     __tablename__ = "user_vocabulary_states"
     __table_args__ = (UniqueConstraint("user_id", "vocabulary_id"),)
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
-    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     vocabulary_id: Mapped[str] = mapped_column(ForeignKey("vocabulary_items.id"))
     interval_days: Mapped[int] = mapped_column(Integer, default=0)
     ease_factor: Mapped[float] = mapped_column(Float, default=2.5)
@@ -176,7 +192,7 @@ class UserVocabularyState(Base):
 class ConversationSession(Base):
     __tablename__ = "conversation_sessions"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
-    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     mode: Mapped[str] = mapped_column(String(40), default="free_conversation")
     title: Mapped[str] = mapped_column(String(140), default="Technical conversation")
     summary: Mapped[str] = mapped_column(Text, default="")
@@ -186,7 +202,7 @@ class ConversationSession(Base):
 class ConversationMessage(Base):
     __tablename__ = "conversation_messages"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
-    session_id: Mapped[str] = mapped_column(ForeignKey("conversation_sessions.id"), index=True)
+    session_id: Mapped[str] = mapped_column(ForeignKey("conversation_sessions.id", ondelete="CASCADE"), index=True)
     role: Mapped[str] = mapped_column(String(20))
     content: Mapped[str] = mapped_column(Text)
     ui_blocks: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
@@ -200,25 +216,28 @@ class KnowledgeSource(Base):
     source_type: Mapped[str] = mapped_column(String(50))
     status: Mapped[str] = mapped_column(String(30), default="ready")
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
 class KnowledgeChunk(Base):
     __tablename__ = "knowledge_chunks"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
-    source_id: Mapped[str] = mapped_column(ForeignKey("knowledge_sources.id"), index=True)
+    source_id: Mapped[str] = mapped_column(ForeignKey("knowledge_sources.id", ondelete="CASCADE"), index=True)
     content: Mapped[str] = mapped_column(Text)
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    embedding: Mapped[list[float] | None] = mapped_column(JSON)
+    embedding: Mapped[list[float] | None] = mapped_column(Vector(1536))
 
 
 class AICallMetadata(Base):
     __tablename__ = "ai_call_metadata"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     operation: Mapped[str] = mapped_column(String(60))
     provider: Mapped[str] = mapped_column(String(40))
     model: Mapped[str] = mapped_column(String(100))
     latency_ms: Mapped[int] = mapped_column(Integer)
     success: Mapped[bool] = mapped_column(Boolean)
     token_usage: Mapped[dict[str, int]] = mapped_column(JSON, default=dict)
+    response_id: Mapped[str | None] = mapped_column(String(100), index=True)
     error_code: Mapped[str | None] = mapped_column(String(80))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)

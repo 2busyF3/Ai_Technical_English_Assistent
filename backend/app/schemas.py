@@ -14,6 +14,15 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class DeleteAccountRequest(BaseModel):
+    password: str
+
+
+class PreferencesRequest(BaseModel):
+    daily_learning_minutes: int = Field(ge=10, le=90)
+    native_explanations: bool
+
+
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
@@ -28,7 +37,7 @@ class OnboardingRequest(BaseModel):
     technologies: list[str] = Field(min_length=1, max_length=15)
     professional_goals: list[str] = Field(min_length=1, max_length=8)
     daily_learning_minutes: int = Field(ge=10, le=90)
-    preferred_exercise_types: list[str] = []
+    preferred_exercise_types: list[str] = Field(default_factory=list)
 
 
 class AssessmentAnswer(BaseModel):
@@ -49,7 +58,7 @@ class VocabularyReviewRequest(BaseModel):
 class TutorRequest(BaseModel):
     session_id: str | None = None
     message: str = Field(min_length=1, max_length=4000)
-    mode: str = "free_conversation"
+    mode: Literal["free_conversation", "technical_interview", "lesson_support"] = "free_conversation"
 
 
 class TutorUIBlock(BaseModel):
@@ -59,9 +68,9 @@ class TutorUIBlock(BaseModel):
 
 class TutorResponse(BaseModel):
     message: str
-    ui_blocks: list[TutorUIBlock] = []
-    suggested_actions: list[str] = []
-    metadata: dict[str, Any] = {}
+    ui_blocks: list[TutorUIBlock] = Field(default_factory=list)
+    suggested_actions: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class EvaluationResult(BaseModel):
@@ -72,7 +81,10 @@ class EvaluationResult(BaseModel):
     clarity: float = Field(ge=0, le=1)
     task_completion: float = Field(ge=0, le=1)
     confidence: float = Field(ge=0, le=1)
-    errors: list[dict[str, Any]] = []
+    is_relevant: bool
+    is_keyword_stuffing: bool
+    feedback: str = Field(min_length=1, max_length=1000)
+    errors: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ORMModel(BaseModel):

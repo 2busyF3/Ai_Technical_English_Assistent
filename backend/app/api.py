@@ -2,20 +2,26 @@ from __future__ import annotations
 
 import asyncio
 import json
+import uuid
 from datetime import datetime, timedelta, timezone
+from time import perf_counter
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
+from fastapi import APIRouter, Cookie, Depends, HTTPException, Response, UploadFile, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.ai.providers import MockLLMProvider, OpenAILLMProvider, create_llm_provider
+from app.ai.providers import OpenAILLMProvider, create_llm_provider
 from app.application import AssessmentService, LearningService
 from app.config import get_settings
 from app.curriculum import B1_COURSE
-from app.database import get_db
+from app.database import SessionLocal, get_db
+from app.evaluation import AIEvaluationService, ScoredEvaluation
+from app.knowledge_service import KnowledgeDocumentParser
 from app.models import (
     Assessment,
+    AICallMetadata,
     ConversationMessage,
     ConversationSession,
     KnowledgeChunk,
@@ -23,6 +29,7 @@ from app.models import (
     LearnerProfile,
     LearningPlan,
     LessonSession,
+    RefreshToken,
     Skill,
     User,
     UserError,
@@ -30,13 +37,17 @@ from app.models import (
     UserVocabularyState,
     VocabularyItem,
 )
-from app.schemas import AssessmentAnswer, Credentials, ExerciseAnswer, LoginRequest, OnboardingRequest, TokenResponse, TutorRequest, VocabularyReviewRequest
+from app.schemas import AssessmentAnswer, Credentials, DeleteAccountRequest, ExerciseAnswer, LoginRequest, OnboardingRequest, PreferencesRequest, TokenResponse, TutorRequest, VocabularyReviewRequest
 from app.domain.learning import SRSService, SRSState, VocabularyReviewService
-from app.security import create_token, current_user, hash_password, verify_password
+from app.security import create_refresh_token, create_token, current_admin, current_user, hash_password, hash_refresh_token, verify_password
+from app.tutor_service import TutorContextService, tutor_ui_blocks
 
 router = APIRouter()
 assessment_service = AssessmentService()
 learning_service = LearningService()
+tutor_context_service = TutorContextService()
+ai_evaluation_service = AIEvaluationService()
+knowledge_parser = KnowledgeDocumentParser()
 
 
 def user_payload(user: User, profile: LearnerProfile | None = None) -> dict:
@@ -50,31 +61,158 @@ def profile_payload(profile: LearnerProfile | None) -> dict | None:
 
 
 @router.post("/auth/register", response_model=TokenResponse, status_code=201)
-async def register(data: Credentials, db: AsyncSession = Depends(get_db)) -> dict:
+async def register(data: Credentials, response: Response, db: AsyncSession = Depends(get_db)) -> dict:
     if await db.scalar(select(User).where(func.lower(User.email) == data.email.lower())):
         raise HTTPException(status.HTTP_409_CONFLICT, "An account with this email already exists")
-    user = User(email=data.email.lower(), password_hash=hash_password(data.password), display_name=data.display_name)
+    normalized_email = data.email.lower()
+    user = User(
+        email=normalized_email,
+        password_hash=hash_password(data.password),
+        display_name=data.display_name,
+        is_admin=normalized_email.casefold() in get_settings().admin_email_set,
+    )
     profile = LearnerProfile(user=user)
     db.add_all([user, profile])
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, "An account with this email already exists") from exc
     await db.refresh(user)
     await db.refresh(profile)
+    await _start_refresh_session(db, user, response)
     return {"access_token":create_token(user.id),"token_type":"bearer","user":user_payload(user, profile)}
 
 
 @router.post("/auth/login", response_model=TokenResponse)
-async def login(data: LoginRequest, db: AsyncSession = Depends(get_db)) -> dict:
+async def login(data: LoginRequest, response: Response, db: AsyncSession = Depends(get_db)) -> dict:
     user = await db.scalar(select(User).where(func.lower(User.email) == data.email.lower()))
     if not user or not verify_password(data.password, user.password_hash):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Email or password is incorrect")
+    if user.email.casefold() in get_settings().admin_email_set:
+        user.is_admin = True
+    profile = await db.scalar(select(LearnerProfile).where(LearnerProfile.user_id == user.id))
+    await _start_refresh_session(db, user, response)
+    return {"access_token":create_token(user.id),"token_type":"bearer","user":user_payload(user, profile)}
+
+
+@router.post("/auth/refresh", response_model=TokenResponse)
+async def refresh_session(
+    response: Response,
+    refresh_token: str | None = Cookie(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    if not refresh_token:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Refresh session is missing")
+    stored = await db.scalar(
+        select(RefreshToken)
+        .where(RefreshToken.token_hash == hash_refresh_token(refresh_token))
+        .with_for_update()
+    )
+    if not stored:
+        _clear_refresh_cookie(response)
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Refresh session is invalid")
+    now = datetime.now(timezone.utc)
+    expires_at = stored.expires_at if stored.expires_at.tzinfo else stored.expires_at.replace(tzinfo=timezone.utc)
+    if stored.revoked_at:
+        family = (await db.scalars(select(RefreshToken).where(RefreshToken.family_id == stored.family_id))).all()
+        for token in family:
+            if not token.revoked_at:
+                token.revoked_at = now
+        await db.commit()
+        _clear_refresh_cookie(response)
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Refresh token reuse detected; session family revoked")
+    if expires_at <= now:
+        stored.revoked_at = now
+        await db.commit()
+        _clear_refresh_cookie(response)
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Refresh session expired")
+    user = await db.get(User, stored.user_id)
+    if not user or not user.is_active:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Account is unavailable")
+    stored.revoked_at = now
+    await _start_refresh_session(db, user, response, family_id=stored.family_id)
     profile = await db.scalar(select(LearnerProfile).where(LearnerProfile.user_id == user.id))
     return {"access_token":create_token(user.id),"token_type":"bearer","user":user_payload(user, profile)}
+
+
+@router.post("/auth/logout", status_code=204)
+async def logout(
+    response: Response,
+    refresh_token: str | None = Cookie(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    if refresh_token:
+        stored = await db.scalar(select(RefreshToken).where(RefreshToken.token_hash == hash_refresh_token(refresh_token)))
+        if stored and not stored.revoked_at:
+            stored.revoked_at = datetime.now(timezone.utc)
+            await db.commit()
+    _clear_refresh_cookie(response)
+
+
+async def _start_refresh_session(
+    db: AsyncSession,
+    user: User,
+    response: Response,
+    family_id: str | None = None,
+) -> None:
+    settings = get_settings()
+    raw_token, token_hash = create_refresh_token()
+    db.add(RefreshToken(
+        user_id=user.id,
+        family_id=family_id or str(uuid.uuid4()),
+        token_hash=token_hash,
+        expires_at=datetime.now(timezone.utc) + timedelta(days=settings.refresh_token_days),
+    ))
+    await db.commit()
+    response.set_cookie(
+        "refresh_token",
+        raw_token,
+        max_age=settings.refresh_token_days * 86400,
+        httponly=True,
+        secure=settings.app_env.casefold() == "production",
+        samesite="lax",
+        path=f"{settings.api_prefix}/auth",
+    )
+
+
+def _clear_refresh_cookie(response: Response) -> None:
+    response.delete_cookie("refresh_token", path=f"{get_settings().api_prefix}/auth")
 
 
 @router.get("/me")
 async def me(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)) -> dict:
     profile = await db.scalar(select(LearnerProfile).where(LearnerProfile.user_id == user.id))
     return {"user":user_payload(user, profile),"profile":profile_payload(profile)}
+
+
+@router.delete("/me", status_code=204)
+async def delete_account(
+    data: DeleteAccountRequest,
+    response: Response,
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    if not verify_password(data.password, user.password_hash):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Password is incorrect")
+    await db.delete(user)
+    await db.commit()
+    _clear_refresh_cookie(response)
+
+
+@router.patch("/me/preferences")
+async def update_preferences(
+    data: PreferencesRequest,
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    profile = await db.scalar(select(LearnerProfile).where(LearnerProfile.user_id == user.id).with_for_update())
+    if not profile:
+        raise HTTPException(404, "Learner profile not found")
+    profile.daily_learning_minutes = data.daily_learning_minutes
+    profile.native_explanations = data.native_explanations
+    await db.commit()
+    return {"profile": profile_payload(profile)}
 
 
 @router.put("/onboarding")
@@ -92,7 +230,8 @@ async def onboarding(data: OnboardingRequest, user: User = Depends(current_user)
 
 @router.post("/assessment/start")
 async def start_assessment(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)) -> dict:
-    assessment, question = await assessment_service.start(db, user)
+    locked_user = await db.scalar(select(User).where(User.id == user.id).with_for_update())
+    assessment, question = await assessment_service.start(db, locked_user or user)
     return {"assessment_id":assessment.id,"progress":assessment.question_count / assessment_service.engine.max_questions,"question":question}
 
 
@@ -101,8 +240,16 @@ async def answer_assessment(data: AssessmentAnswer, user: User = Depends(current
     assessment = await db.get(Assessment, data.assessment_id)
     if not assessment or assessment.user_id != user.id or assessment.status != "active":
         raise HTTPException(404, "Active assessment not found")
+    expected_index = assessment.question_count
+    item = assessment_service._item(expected_index)
+    if data.item_key != item["key"]:
+        raise HTTPException(400, "Answer does not match the current assessment question")
+    evaluation = await _evaluate_answer(item, data.answer, "assessment.answer", user.id) if item["type"] == "text" else None
+    assessment = await db.scalar(select(Assessment).where(Assessment.id == data.assessment_id).with_for_update())
+    if not assessment or assessment.question_count != expected_index or assessment.status != "active":
+        raise HTTPException(409, "Assessment advanced in another request; reload the current question")
     try:
-        return await assessment_service.answer(db, user, assessment, data.item_key, data.answer)
+        return await assessment_service.answer(db, user, assessment, data.item_key, data.answer, evaluation.score if evaluation else None)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 
@@ -123,7 +270,8 @@ async def learning_plan(user: User = Depends(current_user), db: AsyncSession = D
 
 @router.post("/lessons/start")
 async def start_lesson(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)) -> dict:
-    return await learning_service.start_lesson(db, user)
+    locked_user = await db.scalar(select(User).where(User.id == user.id).with_for_update())
+    return await learning_service.start_lesson(db, locked_user or user)
 
 
 @router.post("/lessons/{lesson_id}/answer")
@@ -133,8 +281,23 @@ async def answer_lesson(lesson_id: str, data: ExerciseAnswer, user: User = Depen
         raise HTTPException(404, "Lesson not found")
     if lesson.status != "active":
         raise HTTPException(409, "Lesson is already completed")
+    expected_index = lesson.exercise_index
+    exercise = learning_service.current_exercise(lesson)
+    if exercise is None:
+        raise HTTPException(409, "Lesson has no remaining exercises")
+    evaluation = await _evaluate_answer(exercise, data.answer, "lesson.answer", user.id) if not exercise.get("answer") else None
+    lesson = await db.scalar(select(LessonSession).where(LessonSession.id == lesson_id).with_for_update())
+    if not lesson or lesson.exercise_index != expected_index or lesson.status != "active":
+        raise HTTPException(409, "Lesson advanced in another request; reload it")
     try:
-        return await learning_service.submit(db, user, lesson, data.answer)
+        return await learning_service.submit(
+            db,
+            user,
+            lesson,
+            data.answer,
+            evaluation.score if evaluation else None,
+            evaluation.result.feedback if evaluation else None,
+        )
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
 
@@ -151,7 +314,7 @@ async def vocabulary(q: str = "", user: User = Depends(current_user), db: AsyncS
 
 @router.post("/vocabulary/{vocabulary_id}/review")
 async def review_vocabulary(vocabulary_id: str, data: VocabularyReviewRequest, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)) -> dict:
-    row = (await db.execute(select(VocabularyItem, UserVocabularyState).join(UserVocabularyState, UserVocabularyState.vocabulary_id == VocabularyItem.id).where(VocabularyItem.id == vocabulary_id, UserVocabularyState.user_id == user.id))).first()
+    row = (await db.execute(select(VocabularyItem, UserVocabularyState).join(UserVocabularyState, UserVocabularyState.vocabulary_id == VocabularyItem.id).where(VocabularyItem.id == vocabulary_id, UserVocabularyState.user_id == user.id).with_for_update())).first()
     if not row:
         raise HTTPException(404, "Vocabulary item not found")
     word, state = row
@@ -242,47 +405,123 @@ async def tutor_stream(data: TutorRequest, user: User = Depends(current_user), d
         session = ConversationSession(user_id=user.id, mode=data.mode, title="Backend English practice")
         db.add(session)
         await db.flush()
-    history = list((await db.scalars(select(ConversationMessage).where(ConversationMessage.session_id == session.id).order_by(ConversationMessage.created_at.desc()).limit(10))).all())
-    history.reverse()
-    provider_messages = [{"role":"system","content":"You are a supportive Technical English tutor. Keep conversational context, correct high-value language errors explicitly, and use backend examples."}]
-    provider_messages.extend({"role":message.role,"content":message.content} for message in history)
-    provider_messages.append({"role":"user","content":data.message})
+    prepared = await tutor_context_service.prepare(db, user, session, data.message, data.mode)
     db.add(ConversationMessage(session_id=session.id, role="user", content=data.message))
     await db.commit()
     session_id = session.id
 
     async def events():
         chunks: list[str] = []
+        started = perf_counter()
         yield f"event: meta\ndata: {json.dumps({'session_id': session_id, 'provider': settings.llm_provider, 'model': settings.llm_model})}\n\n"
         try:
-            async for chunk in provider.stream(provider_messages):
-                chunks.append(chunk)
-                yield f"event: token\ndata: {json.dumps({'token': chunk})}\n\n"
-            async with db.begin():
-                db.add(ConversationMessage(session_id=session_id, role="assistant", content="".join(chunks)))
-            blocks = MockLLMProvider().tutor_response(data.message).ui_blocks
+            async with asyncio.timeout(settings.llm_timeout_seconds):
+                async for chunk in provider.stream(
+                    prepared.messages,
+                    max_output_tokens=settings.llm_max_output_tokens,
+                    reasoning={"effort": settings.llm_reasoning_effort},
+                ):
+                    chunks.append(chunk)
+                    yield f"event: token\ndata: {json.dumps({'token': chunk})}\n\n"
+            blocks = tutor_ui_blocks(data.message)
             usage = provider.last_usage if isinstance(provider, OpenAILLMProvider) else {}
             response_id = provider.last_response_id if isinstance(provider, OpenAILLMProvider) else None
+            async with SessionLocal.begin() as event_db:
+                event_db.add(ConversationMessage(session_id=session_id, role="assistant", content="".join(chunks)))
+                event_db.add(AICallMetadata(
+                    user_id=user.id,
+                    operation="tutor.stream",
+                    provider=settings.llm_provider,
+                    model=settings.llm_model,
+                    latency_ms=round((perf_counter() - started) * 1000),
+                    success=True,
+                    token_usage=usage,
+                    response_id=response_id,
+                    error_code=None,
+                ))
             yield f"event: done\ndata: {json.dumps({'ui_blocks': [b.model_dump() for b in blocks], 'suggested_actions':['Give a concrete example','Practice an interview answer'], 'provider':settings.llm_provider, 'model':settings.llm_model, 'response_id':response_id, 'usage':usage})}\n\n"
         except asyncio.CancelledError:
-            return
-        except Exception:
+            await _record_failed_ai_call(settings.llm_provider, settings.llm_model, started, "cancelled", user.id)
+            raise
+        except TimeoutError:
+            await _record_failed_ai_call(settings.llm_provider, settings.llm_model, started, "timeout", user.id)
+            yield f"event: error\ndata: {json.dumps({'message':'The AI tutor timed out. Please retry with a shorter message.'})}\n\n"
+        except Exception as exc:
+            await _record_failed_ai_call(settings.llm_provider, settings.llm_model, started, type(exc).__name__, user.id)
             message = "OpenAI could not answer. Check the API key, billing, model access, and backend logs." if isinstance(provider, OpenAILLMProvider) else "The tutor could not respond. Please retry."
             yield f"event: error\ndata: {json.dumps({'message':message})}\n\n"
     return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no"})
 
 
+async def _record_failed_ai_call(provider: str, model: str, started: float, error_code: str, user_id: str) -> None:
+    async with SessionLocal.begin() as event_db:
+        event_db.add(AICallMetadata(
+            user_id=user_id,
+            operation="tutor.stream",
+            provider=provider,
+            model=model,
+            latency_ms=round((perf_counter() - started) * 1000),
+            success=False,
+            token_usage={},
+            error_code=error_code[:80],
+        ))
+
+
+async def _evaluate_answer(item: dict, answer: str, operation: str, user_id: str) -> ScoredEvaluation:
+    settings = get_settings()
+    try:
+        provider = create_llm_provider(settings.llm_provider, settings.llm_api_key, settings.llm_model)
+        async with asyncio.timeout(settings.llm_timeout_seconds):
+            evaluation = await ai_evaluation_service.evaluate(
+                provider,
+                prompt=item["prompt"],
+                answer=answer,
+                rubric_terms=item.get("rubric_terms"),
+            )
+    except TimeoutError as exc:
+        raise HTTPException(504, "AI evaluation timed out; your answer was not submitted") from exc
+    except Exception as exc:
+        raise HTTPException(503, "AI evaluation is unavailable; your answer was not submitted") from exc
+    async with SessionLocal.begin() as event_db:
+        event_db.add(AICallMetadata(
+            user_id=user_id,
+            operation=operation,
+            provider=settings.llm_provider,
+            model=settings.llm_model,
+            latency_ms=evaluation.latency_ms,
+            success=True,
+            token_usage=evaluation.token_usage,
+            response_id=evaluation.response_id,
+            error_code=None,
+        ))
+    return evaluation
+
+
 @router.post("/knowledge/ingest", status_code=202)
-async def ingest(file: UploadFile, source_type: str = "CUSTOM_SOURCE", user: User = Depends(current_user), db: AsyncSession = Depends(get_db)) -> dict:
+async def ingest(file: UploadFile, source_type: str = "CUSTOM_SOURCE", user: User = Depends(current_admin), db: AsyncSession = Depends(get_db)) -> dict:
     raw = await file.read()
     if len(raw) > 10_000_000:
         raise HTTPException(413, "File is too large")
-    text = raw.decode("utf-8", errors="ignore")
-    source = KnowledgeSource(title=file.filename or "Uploaded source", source_type=source_type, metadata_json={"filename":file.filename})
+    try:
+        parsed_chunks = knowledge_parser.parse(file.filename or "source.txt", raw)
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not parsed_chunks:
+        raise HTTPException(400, "The uploaded document contains no readable text")
+    normalized_source_type = source_type.strip().upper()
+    if normalized_source_type not in {"CUSTOM_SOURCE", "INTERNAL_CURRICULUM", "OFFICIAL_DOCUMENTATION", "LANGUAGE_TEXTBOOK"}:
+        raise HTTPException(400, "Unsupported knowledge source type")
+    source = KnowledgeSource(title=file.filename or "Uploaded source", source_type=normalized_source_type, status="processing", metadata_json={"filename":file.filename,"uploaded_by":user.id})
     db.add(source)
     await db.flush()
-    chunks = [text[i:i+1800] for i in range(0, len(text), 1500) if text[i:i+1800].strip()]
-    for index, content in enumerate(chunks):
-        db.add(KnowledgeChunk(source_id=source.id, content=content, metadata_json={"section":index+1,"source_type":source_type}, embedding=None))
+    for chunk in parsed_chunks:
+        db.add(KnowledgeChunk(source_id=source.id, content=chunk.content, metadata_json={**chunk.metadata,"source_type":normalized_source_type}, embedding=None))
     await db.commit()
-    return {"source_id":source.id,"status":"ready","chunks":len(chunks)}
+    try:
+        from app.workers import embed_knowledge
+        embed_knowledge.send(source.id)
+    except Exception as exc:
+        source.status = "queue_failed"
+        await db.commit()
+        raise HTTPException(503, "Knowledge was stored but the embedding job could not be queued") from exc
+    return {"source_id":source.id,"status":"processing","chunks":len(parsed_chunks)}

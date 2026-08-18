@@ -1,3 +1,5 @@
+import hashlib
+import secrets
 from datetime import datetime, timedelta, timezone
 
 import jwt
@@ -28,6 +30,15 @@ def create_token(user_id: str) -> str:
     return jwt.encode({"sub": user_id, "exp": expires}, settings.secret_key, algorithm="HS256")
 
 
+def create_refresh_token() -> tuple[str, str]:
+    token = secrets.token_urlsafe(48)
+    return token, hashlib.sha256(token.encode()).hexdigest()
+
+
+def hash_refresh_token(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
 async def current_user(
     token: str = Depends(oauth2_scheme), db: AsyncSession = Depends(get_db)
 ) -> User:
@@ -40,3 +51,8 @@ async def current_user(
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Account is unavailable")
     return user
 
+
+async def current_admin(user: User = Depends(current_user)) -> User:
+    if not user.is_admin:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Administrator access is required")
+    return user

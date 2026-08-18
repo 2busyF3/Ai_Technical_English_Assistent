@@ -120,7 +120,7 @@ if ($completedSubmitStatus -ne 409) { throw "Expected 409 after completed lesson
 $after = (Invoke-RestMethod -Uri "$BaseUrl/skills" -Headers $headers).items
 $errors = (Invoke-RestMethod -Uri "$BaseUrl/errors" -Headers $headers).items
 $skillIds = @{ 'deployment-updates' = 'tech.deployment'; 'rest-explanations' = 'tech.rest'; 'auth-explanations' = 'tech.auth'; 'standup-communication' = 'professional.standup' }
-[pscustomobject]@{
+$result = [pscustomobject]@{
     placement = [pscustomobject]@{ questions = 7; cefr = $assessment.result.cefr; dimensions = $assessment.result.dimensions }
     lessons = $lessons
     progress = [pscustomobject]@{ modules = "$($progress.course_completed)/$($progress.course_total)"; lessons = $progress.completed_lessons; achievement = $progress.achievements -contains 'B1 core course completed' }
@@ -129,4 +129,8 @@ $skillIds = @{ 'deployment-updates' = 'tech.deployment'; 'rest-explanations' = '
     failed_review = [pscustomobject]@{ completed = $failedReviewLesson.status -eq 'completed'; steps = $failedReviewLesson.total_steps; duplicate_submit_status = $completedSubmitStatus }
     mastery = @($keys | ForEach-Object { $id = $skillIds[$_]; [pscustomobject]@{ skill = $id; before = ($before | Where-Object id -eq $id).mastery; after = ($after | Where-Object id -eq $id).mastery } })
     errors = @($errors.type)
-} | ConvertTo-Json -Depth 7
+}
+Invoke-RestMethod -Method Delete -Uri "$BaseUrl/me" -Headers $headers -ContentType application/json -Body (@{
+    password = 'Acceptance123!'
+} | ConvertTo-Json) | Out-Null
+$result | ConvertTo-Json -Depth 7

@@ -7,7 +7,10 @@ from app.ai.providers import MockLLMProvider, OpenAILLMProvider, create_llm_prov
 from app.domain.learning import MasteryService, PlacementEngine, PriorityInput, PersonalizationEngine, SRSService, SRSState, VocabularyReviewService
 from app.rag.retrieval import Candidate, HybridRetriever, RetrievalQuery
 from app.application import AssessmentService, LearningService
+from app.evaluation import AIEvaluationService
 from app.models import LessonSession
+from app.knowledge_service import KnowledgeDocumentParser
+from app.schemas import EvaluationResult
 
 
 def test_personalization_prioritizes_weak_relevant_skill() -> None:
@@ -123,3 +126,43 @@ def test_openai_provider_never_silently_falls_back_to_mock() -> None:
         create_llm_provider("openai", "", "gpt-5-mini")
     assert isinstance(create_llm_provider("openai", "test-key", "gpt-5-mini"), OpenAILLMProvider)
     assert isinstance(create_llm_provider("mock", "", "gpt-5-mini"), MockLLMProvider)
+
+
+async def test_ai_evaluation_caps_keyword_stuffing() -> None:
+    class StuffingProvider:
+        last_response_id = "resp_test"
+        last_usage = {"total_tokens": 42}
+
+        async def generate_structured(self, messages, schema, **kwargs):
+            return EvaluationResult(
+                technical_correctness=.95,
+                grammar_accuracy=.9,
+                vocabulary_range=.9,
+                technical_vocabulary=.95,
+                clarity=.9,
+                task_completion=.9,
+                confidence=.95,
+                is_relevant=True,
+                is_keyword_stuffing=True,
+                feedback="This is a list of terms rather than an answer.",
+            )
+
+    result = await AIEvaluationService().evaluate(
+        StuffingProvider(),
+        prompt="Explain authentication and authorization.",
+        answer="authentication authorization identity permission access",
+    )
+    assert result.score == .2
+    assert result.response_id == "resp_test"
+    assert result.token_usage["total_tokens"] == 42
+
+
+def test_knowledge_parser_rejects_fake_or_unsupported_documents() -> None:
+    parser = KnowledgeDocumentParser()
+    with pytest.raises(ValueError, match="Only UTF-8 text"):
+        parser.parse("source.docx", b"not really a document")
+    with pytest.raises(UnicodeDecodeError):
+        parser.parse("source.txt", b"\xff\xfe")
+    chunks = parser.parse("source.md", b"# Cache\n\nCache invalidation prevents stale reads.")
+    assert chunks[0].metadata["format"] == "md"
+    assert "stale reads" in chunks[0].content

@@ -1,6 +1,7 @@
 import logging
 import time
 import uuid
+from contextlib import asynccontextmanager
 
 import structlog
 from fastapi import FastAPI, Request
@@ -11,23 +12,22 @@ from fastapi.responses import JSONResponse
 from app.api import router
 from app.application import seed_database
 from app.config import get_settings
-from app.database import SessionLocal, create_schema
+from app.database import SessionLocal
 
 settings = get_settings()
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = structlog.get_logger()
 
-app = FastAPI(title="AI Technical English Tutor", version="0.1.0", docs_url="/api/docs", openapi_url="/api/openapi.json")
-app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origin_list, allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
-app.include_router(router, prefix=settings.api_prefix)
-
-
-@app.on_event("startup")
-async def startup() -> None:
-    await create_schema()
+@asynccontextmanager
+async def lifespan(_: FastAPI):
     async with SessionLocal() as db:
         await seed_database(db)
+    yield
 
+
+app = FastAPI(title="AI Technical English Tutor", version="0.1.0", docs_url="/api/docs", openapi_url="/api/openapi.json", lifespan=lifespan)
+app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origin_list, allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+app.include_router(router, prefix=settings.api_prefix)
 
 @app.middleware("http")
 async def request_context(request: Request, call_next):

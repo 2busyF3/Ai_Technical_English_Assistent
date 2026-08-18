@@ -2,20 +2,19 @@ import argparse
 import asyncio
 from pathlib import Path
 
-from app.database import SessionLocal, create_schema
+from app.database import SessionLocal
+from app.knowledge_service import KnowledgeDocumentParser
 from app.models import KnowledgeChunk, KnowledgeSource
 
 
 async def ingest(path: Path, source_type: str) -> None:
-    await create_schema()
-    text = path.read_text(encoding="utf-8", errors="ignore")
+    chunks = KnowledgeDocumentParser().parse(path.name, path.read_bytes())
     async with SessionLocal() as db:
         source = KnowledgeSource(title=path.stem, source_type=source_type, metadata_json={"path":str(path)})
         db.add(source)
         await db.flush()
-        chunks = [text[i:i+1800] for i in range(0, len(text), 1500) if text[i:i+1800].strip()]
-        for index, content in enumerate(chunks):
-            db.add(KnowledgeChunk(source_id=source.id, content=content, metadata_json={"section":index+1}, embedding=None))
+        for chunk in chunks:
+            db.add(KnowledgeChunk(source_id=source.id, content=chunk.content, metadata_json=chunk.metadata, embedding=None))
         await db.commit()
     print(f"Ingested {path.name}: {len(chunks)} chunks, source={source.id}")
 

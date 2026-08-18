@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.ai.providers import MockLLMProvider
 from app.curriculum import B1_COURSE, DEPENDENCIES, PLACEMENT_ITEMS, SKILLS, VOCABULARY
 from app.domain.learning import MasteryService, PlacementEngine, PriorityInput, PersonalizationEngine
 from app.models import (
@@ -26,15 +25,19 @@ from app.models import (
 
 
 async def seed_database(db: AsyncSession) -> None:
-    if (await db.scalar(select(func.count()).select_from(Skill))) or 0:
-        return
+    existing_skills = set((await db.scalars(select(Skill.id))).all())
     for key, name, category, difficulty, cefr, description in SKILLS:
-        db.add(Skill(id=key, name=name, category=category, difficulty=difficulty, cefr=cefr, description=description, career_relevance={"BACKEND": 1.0, "GENERAL_SOFTWARE_ENGINEERING": .75}))
+        if key not in existing_skills:
+            db.add(Skill(id=key, name=name, category=category, difficulty=difficulty, cefr=cefr, description=description, career_relevance={"BACKEND": 1.0, "GENERAL_SOFTWARE_ENGINEERING": .75}))
     await db.flush()
+    existing_dependencies = set((await db.execute(select(SkillDependency.skill_id, SkillDependency.prerequisite_id))).all())
     for skill, prerequisite in DEPENDENCIES:
-        db.add(SkillDependency(skill_id=skill, prerequisite_id=prerequisite))
+        if (skill, prerequisite) not in existing_dependencies:
+            db.add(SkillDependency(skill_id=skill, prerequisite_id=prerequisite))
+    existing_terms = set((await db.scalars(select(VocabularyItem.term))).all())
     for term, definition, simple, collocations, mistakes in VOCABULARY:
-        db.add(VocabularyItem(term=term, definition=definition, simple_definition=simple, native_explanation=f"Термин: {term}", examples=[f"We use {term} when discussing backend systems."], collocations=collocations, common_mistakes=mistakes, tags=["backend", "technical-english"]))
+        if term not in existing_terms:
+            db.add(VocabularyItem(term=term, definition=definition, simple_definition=simple, native_explanation=f"Термин: {term}", examples=[f"We use {term} when discussing backend systems."], collocations=collocations, common_mistakes=mistakes, tags=["backend", "technical-english"]))
     await db.commit()
 
 
@@ -50,14 +53,17 @@ class AssessmentService:
             await db.refresh(active)
         return active, self._item(active.question_count)
 
-    async def answer(self, db: AsyncSession, user: User, assessment: Assessment, item_key: str, answer: str) -> dict:
+    async def answer(self, db: AsyncSession, user: User, assessment: Assessment, item_key: str, answer: str, evaluated_score: float | None = None) -> dict:
+        expected_item = PLACEMENT_ITEMS[assessment.question_count] if assessment.question_count < len(PLACEMENT_ITEMS) else None
+        if expected_item is None or item_key != expected_item["key"]:
+            raise ValueError("Answer does not match the current assessment question")
         item = next((item for item in PLACEMENT_ITEMS if item["key"] == item_key), None)
         if item is None:
             raise ValueError("Unknown assessment item")
         if item["type"] == "choice":
             score = 1.0 if answer.strip().lower() == item["answer"].lower() else 0.0
         else:
-            score = self._score_text(answer)
+            score = evaluated_score if evaluated_score is not None else self._score_text(answer)
         ability, confidence, done = self.engine.update(assessment.ability, assessment.confidence, score, item["difficulty"], assessment.question_count)
         scores = dict(assessment.dimension_scores or {})
         scores[item["dimension"]] = round((scores.get(item["dimension"], score) + score) / 2, 3)
@@ -113,7 +119,6 @@ class AssessmentService:
 class LearningService:
     engine = PersonalizationEngine()
     mastery = MasteryService()
-    mock = MockLLMProvider()
 
     async def dashboard(self, db: AsyncSession, user: User) -> dict:
         profile = await db.scalar(select(LearnerProfile).where(LearnerProfile.user_id == user.id))
@@ -123,10 +128,16 @@ class LearningService:
         due = await db.scalar(select(func.count()).select_from(UserVocabularyState).where(UserVocabularyState.user_id == user.id, UserVocabularyState.due_at <= datetime.now(timezone.utc))) or 0
         errors = (await db.scalars(select(UserError).where(UserError.user_id == user.id).order_by(UserError.occurrences.desc()).limit(3))).all()
         completed_lessons = (await db.scalars(select(LessonSession).where(LessonSession.user_id == user.id, LessonSession.status == "completed"))).all()
+        week_start = datetime.now(timezone.utc) - timedelta(days=7)
+        weekly_minutes = sum(
+            profile.daily_learning_minutes
+            for lesson in completed_lessons
+            if profile and lesson.completed_at and lesson.completed_at >= week_start
+        )
         completed_keys = {lesson.summary.get("course_key") for lesson in completed_lessons if lesson.summary}
         next_course = next((course for course in B1_COURSE if course["key"] not in completed_keys), B1_COURSE[0])
         avg = sum(state.mastery for state in states) / len(states) if states else .42
-        return {"greeting": f"Ready for your next step, {user.display_name}?", "level": profile.estimated_cefr if profile else "B1", "target": profile.target_cefr if profile else "B2", "streak": profile.streak if profile else 0, "weekly_minutes": profile.total_minutes if profile else 0, "weekly_goal": (profile.daily_learning_minutes * 5 if profile else 100), "overall_progress": round(avg * 100), "due_vocabulary": due, "course_progress": {"completed":len(completed_keys & {course['key'] for course in B1_COURSE}),"total":len(B1_COURSE),"level":"B1"}, "today_lesson": {"title":next_course["title"], "description":next_course["objective"], "duration":next_course["duration"], "skills":[skills[next_course["skill_id"]].name, "Technical vocabulary", "Professional clarity"]}, "attention": [{"id":state.skill_id,"name":skills[state.skill_id].name,"progress":round(state.mastery*100)} for state in ranked[:3]], "recent_errors": [{"type":e.error_type,"original":e.original_fragment,"correction":e.corrected_fragment} for e in errors]}
+        return {"greeting": f"Ready for your next step, {user.display_name}?", "level": profile.estimated_cefr if profile else "B1", "target": profile.target_cefr if profile else "B2", "streak": profile.streak if profile else 0, "weekly_minutes": weekly_minutes, "weekly_goal": (profile.daily_learning_minutes * 5 if profile else 100), "overall_progress": round(avg * 100), "due_vocabulary": due, "course_progress": {"completed":len(completed_keys & {course['key'] for course in B1_COURSE}),"total":len(B1_COURSE),"level":"B1"}, "today_lesson": {"title":next_course["title"], "description":next_course["objective"], "duration":next_course["duration"], "skills":[skills[next_course["skill_id"]].name, "Technical vocabulary", "Professional clarity"]}, "attention": [{"id":state.skill_id,"name":skills[state.skill_id].name,"progress":round(state.mastery*100)} for state in ranked[:3]], "recent_errors": [{"type":e.error_type,"original":e.original_fragment,"correction":e.corrected_fragment} for e in errors]}
 
     async def start_lesson(self, db: AsyncSession, user: User) -> dict:
         active = await db.scalar(select(LessonSession).where(LessonSession.user_id == user.id, LessonSession.status == "active"))
@@ -140,7 +151,7 @@ class LearningService:
             await db.refresh(active)
         return self.lesson_payload(active)
 
-    async def submit(self, db: AsyncSession, user: User, lesson: LessonSession, answer: str) -> dict:
+    async def submit(self, db: AsyncSession, user: User, lesson: LessonSession, answer: str, evaluated_score: float | None = None, evaluation_feedback: str | None = None) -> dict:
         course = self._course(lesson)
         exercises = course["exercises"]
         exercise_index = self._current_exercise_index(lesson)
@@ -152,7 +163,7 @@ class LearningService:
             if score < .7:
                 await self._save_error(db, user.id, lesson.skill_id, {"error_type":exercise.get("error_type","exercise-error"),"original":answer,"corrected":exercise["answer"],"explanation":exercise.get("explanation","Review the target language pattern.")})
         else:
-            score = self._score_open_exercise(exercise, answer)
+            score = evaluated_score if evaluated_score is not None else self._score_open_exercise(exercise, answer)
             if score < .7:
                 await self._save_error(db, user.id, lesson.skill_id, {"error_type":exercise.get("error_type","open-answer-clarity"),"original":answer,"corrected":f"Include: {', '.join(exercise.get('rubric_terms', []))}","explanation":exercise.get("explanation","Make the technical meaning explicit and complete.")})
         state = await db.scalar(select(UserSkillState).where(UserSkillState.user_id == user.id, UserSkillState.skill_id == lesson.skill_id))
@@ -177,10 +188,15 @@ class LearningService:
             lesson.summary = {"course_key":course["key"],"retry_queue":retry_queue,**course["summary"]}
             profile = await db.scalar(select(LearnerProfile).where(LearnerProfile.user_id == user.id))
             if profile:
-                profile.streak += 1
+                today = datetime.now(timezone.utc).date()
+                if profile.last_learning_date != today:
+                    profile.streak = profile.streak + 1 if profile.last_learning_date == today - timedelta(days=1) else 1
+                    profile.last_learning_date = today
                 profile.total_minutes += profile.daily_learning_minutes
         await db.commit()
-        if score >= .75:
+        if evaluation_feedback:
+            feedback = evaluation_feedback
+        elif score >= .75:
             feedback = "Strong answer — your technical meaning is clear."
         elif is_initial_pass:
             feedback = "Good direction. I’ve added this pattern to a short review at the end of the lesson."
@@ -196,6 +212,11 @@ class LearningService:
         retry_queue = list((lesson.summary or {}).get("retry_queue", []))
         retry_position = lesson.exercise_index - len(exercises)
         return retry_queue[retry_position] if retry_position < len(retry_queue) else None
+
+    @classmethod
+    def current_exercise(cls, lesson: LessonSession) -> dict | None:
+        index = cls._current_exercise_index(lesson)
+        return None if index is None else cls._course(lesson)["exercises"][index]
 
     @classmethod
     def lesson_payload(cls, lesson: LessonSession) -> dict:

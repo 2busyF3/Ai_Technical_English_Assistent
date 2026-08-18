@@ -23,12 +23,17 @@ def run_migrations_offline() -> None:
 async def run_async_migrations() -> None:
     engine = async_engine_from_config(config.get_section(config.config_ini_section, {}), prefix="sqlalchemy.", poolclass=pool.NullPool)
     async with engine.connect() as connection:
-        await connection.run_sync(lambda conn: (context.configure(connection=conn, target_metadata=target_metadata), context.begin_transaction().__enter__(), context.run_migrations()))
+        await connection.run_sync(run_migrations)
     await engine.dispose()
+
+
+def run_migrations(connection) -> None:
+    context.configure(connection=connection, target_metadata=target_metadata, compare_type=True)
+    with context.begin_transaction():
+        context.run_migrations()
 
 
 if context.is_offline_mode(): run_migrations_offline()
 else:
     import asyncio
     asyncio.run(run_async_migrations())
-

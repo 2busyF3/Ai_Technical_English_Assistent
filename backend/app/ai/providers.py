@@ -21,14 +21,6 @@ class EmbeddingProvider(Protocol):
     async def embed(self, texts: list[str]) -> list[list[float]]: ...
 
 
-class STTProvider(Protocol):
-    async def transcribe(self, audio: bytes) -> str: ...
-
-
-class TTSProvider(Protocol):
-    async def synthesize(self, text: str) -> bytes: ...
-
-
 class MockLLMProvider:
     async def generate(self, messages: list[dict[str, str]], **kwargs: Any) -> str:
         return self._reply_with_context(messages)
@@ -39,7 +31,7 @@ class MockLLMProvider:
             technical = .84 if any(word in text for word in ("api", "cache", "database", "authorization", "latency")) else .62
             grammar = .62 if "i've" in text and "yesterday" in text else .82
             errors = [] if grammar > .7 else [{"error_type":"present-perfect-vs-past-simple","original":"I've ... yesterday","corrected":"I ... yesterday","explanation":"Use Past Simple with a finished time marker."}]
-            return schema.model_validate({"technical_correctness":technical,"grammar_accuracy":grammar,"vocabulary_range":.76,"technical_vocabulary":technical,"clarity":.78,"task_completion":.85,"confidence":.86,"errors":errors})
+            return schema.model_validate({"technical_correctness":technical,"grammar_accuracy":grammar,"vocabulary_range":.76,"technical_vocabulary":technical,"clarity":.78,"task_completion":.85,"confidence":.86,"is_relevant":True,"is_keyword_stuffing":False,"feedback":"The answer addresses the task and is understandable.","errors":errors})
         return schema.model_validate({})
 
     async def stream(self, messages: list[dict[str, str]], **kwargs: Any) -> AsyncIterator[str]:
@@ -90,6 +82,17 @@ class MockEmbeddingProvider:
         return [[(sum(map(ord, text[i::8])) % 997) / 997 for i in range(8)] for text in texts]
 
 
+class OpenAIEmbeddingProvider:
+    def __init__(self, api_key: str, model: str):
+        from openai import AsyncOpenAI
+        self.client = AsyncOpenAI(api_key=api_key)
+        self.model = model
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        response = await self.client.embeddings.create(model=self.model, input=texts)
+        return [item.embedding for item in response.data]
+
+
 class OpenAILLMProvider:
     def __init__(self, api_key: str, model: str):
         from openai import AsyncOpenAI
@@ -100,10 +103,12 @@ class OpenAILLMProvider:
 
     async def generate(self, messages: list[dict[str, str]], **kwargs: Any) -> str:
         response = await self.client.responses.create(model=self.model, input=messages, **kwargs)
+        self._capture_metadata(response)
         return response.output_text
 
     async def generate_structured(self, messages: list[dict[str, str]], schema: type[T], **kwargs: Any) -> T:
         response = await self.client.responses.parse(model=self.model, input=messages, text_format=schema, **kwargs)
+        self._capture_metadata(response)
         return response.output_parsed
 
     async def stream(self, messages: list[dict[str, str]], **kwargs: Any) -> AsyncIterator[str]:
@@ -113,14 +118,17 @@ class OpenAILLMProvider:
                 yield event.delta
             elif event.type == "response.completed":
                 response = event.response
-                self.last_response_id = response.id
-                usage = response.usage
-                if usage:
-                    self.last_usage = {
-                        "input_tokens": usage.input_tokens,
-                        "output_tokens": usage.output_tokens,
-                        "total_tokens": usage.total_tokens,
-                    }
+                self._capture_metadata(response)
+
+    def _capture_metadata(self, response: Any) -> None:
+        self.last_response_id = response.id
+        usage = response.usage
+        if usage:
+            self.last_usage = {
+                "input_tokens": usage.input_tokens,
+                "output_tokens": usage.output_tokens,
+                "total_tokens": usage.total_tokens,
+            }
 
 
 def create_llm_provider(provider: str, api_key: str, model: str) -> LLMProvider:
