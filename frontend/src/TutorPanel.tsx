@@ -18,7 +18,7 @@ export function StableTutorPage(){
   const bottom=useRef<HTMLDivElement>(null);
 
   useEffect(()=>{mounted.current=true;return()=>{mounted.current=false;controller.current?.abort()}},[]);
-  useEffect(()=>bottom.current?.scrollIntoView({behavior:"smooth"}),[messages]);
+  useEffect(()=>{bottom.current?.scrollIntoView({behavior:"smooth"});},[messages]);
 
   const send=async(text?:string)=>{
     const message=(text??input).trim();

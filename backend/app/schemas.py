@@ -41,6 +41,11 @@ class ExerciseAnswer(BaseModel):
     answer: str = Field(min_length=1, max_length=4000)
 
 
+class VocabularyReviewRequest(BaseModel):
+    recall_answer: str = Field(min_length=1, max_length=200)
+    context_sentence: str = Field(min_length=3, max_length=1000)
+
+
 class TutorRequest(BaseModel):
     session_id: str | None = None
     message: str = Field(min_length=1, max_length=4000)
@@ -72,4 +77,3 @@ class EvaluationResult(BaseModel):
 
 class ORMModel(BaseModel):
     model_config = ConfigDict(from_attributes=True)
-

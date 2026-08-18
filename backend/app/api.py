@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
 from fastapi.responses import StreamingResponse
@@ -29,7 +29,8 @@ from app.models import (
     UserVocabularyState,
     VocabularyItem,
 )
-from app.schemas import AssessmentAnswer, Credentials, ExerciseAnswer, LoginRequest, OnboardingRequest, TokenResponse, TutorRequest
+from app.schemas import AssessmentAnswer, Credentials, ExerciseAnswer, LoginRequest, OnboardingRequest, TokenResponse, TutorRequest, VocabularyReviewRequest
+from app.domain.learning import SRSService, SRSState, VocabularyReviewService
 from app.security import create_token, current_user, hash_password, verify_password
 
 router = APIRouter()
@@ -140,7 +141,35 @@ async def vocabulary(q: str = "", user: User = Depends(current_user), db: AsyncS
     if q:
         query = query.where(or_(VocabularyItem.term.ilike(f"%{q}%"), VocabularyItem.definition.ilike(f"%{q}%")))
     rows = (await db.execute(query.order_by(UserVocabularyState.due_at))).all()
-    return {"items":[{"id":word.id,"term":word.term,"definition":word.definition,"simple_definition":word.simple_definition,"native_explanation":word.native_explanation,"examples":word.examples,"collocations":word.collocations,"common_mistakes":word.common_mistakes,"cefr":word.cefr,"due":state.due_at <= datetime.now(timezone.utc),"repetitions":state.repetitions} for word, state in rows]}
+    now = datetime.now(timezone.utc)
+    return {"items":[{"id":word.id,"term":word.term,"definition":word.definition,"simple_definition":word.simple_definition,"native_explanation":word.native_explanation,"examples":word.examples,"collocations":word.collocations,"common_mistakes":word.common_mistakes,"cefr":word.cefr,"due":state.due_at <= now,"repetitions":state.repetitions,"interval_days":state.interval_days,"due_at":state.due_at} for word, state in rows]}
+
+
+@router.post("/vocabulary/{vocabulary_id}/review")
+async def review_vocabulary(vocabulary_id: str, data: VocabularyReviewRequest, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)) -> dict:
+    row = (await db.execute(select(VocabularyItem, UserVocabularyState).join(UserVocabularyState, UserVocabularyState.vocabulary_id == VocabularyItem.id).where(VocabularyItem.id == vocabulary_id, UserVocabularyState.user_id == user.id))).first()
+    if not row:
+        raise HTTPException(404, "Vocabulary item not found")
+    word, state = row
+    sentence = data.context_sentence.strip()
+    evaluation = VocabularyReviewService.evaluate(word.term, data.recall_answer, sentence)
+    next_state, due_at = SRSService().review(SRSState(state.repetitions, state.interval_days, state.ease_factor), evaluation.quality)
+    if evaluation.quality < 3:
+        due_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+        state.interval_days = 0
+    else:
+        state.interval_days = next_state.interval_days
+    state.repetitions = next_state.repetitions
+    state.ease_factor = next_state.ease_factor
+    state.due_at = due_at
+    await db.commit()
+    if not evaluation.contains_term:
+        feedback = f"Use the exact term ‘{word.term}’ in your sentence."
+    elif not evaluation.context_correct:
+        feedback = "Add enough context to show what the term means in a real engineering situation."
+    else:
+        feedback = "Good contextual use — the technical meaning is clear."
+    return {"term":word.term,"recall_correct":evaluation.recall_correct,"context_correct":evaluation.context_correct,"quality":evaluation.quality,"feedback":feedback,"correct_answer":word.term,"example":word.examples[0] if word.examples else "","repetitions":state.repetitions,"interval_days":state.interval_days,"due_at":state.due_at}
 
 
 @router.get("/errors")
@@ -155,7 +184,24 @@ async def progress(user: User = Depends(current_user), db: AsyncSession = Depend
     grouped: dict[str, list[float]] = {}
     for state, skill in states:
         grouped.setdefault(skill.category, []).append(state.mastery)
-    return {"categories":[{"name":name.replace("_", " ").title(),"progress":round(sum(values)/len(values)*100)} for name,values in grouped.items()],"activity":[42,65,30,80,55,90,70],"achievements":["First lesson completed","Backend vocabulary starter","3-day learning rhythm"]}
+    profile = await db.scalar(select(LearnerProfile).where(LearnerProfile.user_id == user.id))
+    completed_lessons = (await db.scalars(select(LessonSession).where(LessonSession.user_id == user.id, LessonSession.status == "completed"))).all()
+    vocabulary_reviews = await db.scalar(select(func.coalesce(func.sum(UserVocabularyState.repetitions), 0)).where(UserVocabularyState.user_id == user.id)) or 0
+    today = datetime.now(timezone.utc).date()
+    activity = []
+    activity_labels = []
+    for offset in range(6, -1, -1):
+        day = today - timedelta(days=offset)
+        activity.append(sum(1 for lesson in completed_lessons if lesson.completed_at and lesson.completed_at.date() == day))
+        activity_labels.append(day.strftime("%a")[0])
+    achievements = []
+    if completed_lessons:
+        achievements.append("First lesson completed")
+    if vocabulary_reviews:
+        achievements.append("Backend vocabulary starter")
+    if len(completed_lessons) >= 3:
+        achievements.append("Three lessons completed")
+    return {"categories":[{"name":name.replace("_", " ").title(),"progress":round(sum(values)/len(values)*100)} for name,values in grouped.items()],"activity":activity,"activity_labels":activity_labels,"achievements":achievements,"level":profile.estimated_cefr if profile else "B1","target":profile.target_cefr if profile else "B2","streak":profile.streak if profile else 0,"completed_lessons":len(completed_lessons),"vocabulary_reviews":int(vocabulary_reviews)}
 
 
 @router.get("/skills")

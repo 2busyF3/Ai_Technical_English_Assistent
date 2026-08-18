@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from math import exp
@@ -53,6 +54,28 @@ class SRSService:
         return next_state, due
 
 
+@dataclass(frozen=True)
+class VocabularyReviewEvaluation:
+    recall_correct: bool
+    context_correct: bool
+    contains_term: bool
+    quality: int
+
+
+class VocabularyReviewService:
+    @staticmethod
+    def evaluate(term: str, recall_answer: str, context_sentence: str) -> VocabularyReviewEvaluation:
+        def normalize(value: str) -> str:
+            return re.sub(r"[^a-z0-9 ]", "", value.casefold()).strip()
+
+        recall_correct = normalize(recall_answer) == normalize(term)
+        contains_term = bool(re.search(rf"(?<![a-z0-9]){re.escape(term.casefold())}(?![a-z0-9])", context_sentence.casefold()))
+        enough_context = len(re.findall(r"[A-Za-z0-9'-]+", context_sentence)) >= 6
+        context_correct = contains_term and enough_context
+        quality = 5 if recall_correct and context_correct and len(context_sentence.split()) >= 10 else 4 if recall_correct and context_correct else 3 if context_correct else 2 if recall_correct else 1
+        return VocabularyReviewEvaluation(recall_correct, context_correct, contains_term, quality)
+
+
 class PlacementEngine:
     max_questions = 7
 
@@ -68,4 +91,3 @@ class PlacementEngine:
     def cefr(ability: float) -> str:
         levels = ["A1", "A2", "B1", "B2", "C1", "C2"]
         return levels[min(5, int(ability * 6))]
-

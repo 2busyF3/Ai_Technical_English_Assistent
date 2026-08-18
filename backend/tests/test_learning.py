@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
 from app.ai.context import ContextBuilder, TutorContext
-from app.domain.learning import MasteryService, PlacementEngine, PriorityInput, PersonalizationEngine, SRSService, SRSState
+from app.domain.learning import MasteryService, PlacementEngine, PriorityInput, PersonalizationEngine, SRSService, SRSState, VocabularyReviewService
 from app.rag.retrieval import Candidate, HybridRetriever, RetrievalQuery
 from app.application import LearningService
 from app.models import LessonSession
@@ -70,3 +70,10 @@ def test_lesson_replays_failed_exercise_after_initial_pass() -> None:
     payload = LearningService.lesson_payload(lesson)
     assert payload["total_steps"] == 4
     assert payload["exercise"]["is_review"] is True
+
+
+def test_vocabulary_review_requires_recall_and_real_context() -> None:
+    successful = VocabularyReviewService.evaluate("latency", "Latency!", "We reduced API latency by adding a Redis cache.")
+    failed = VocabularyReviewService.evaluate("latency", "throughput", "The production API was slow yesterday.")
+    assert successful.recall_correct and successful.context_correct and successful.quality >= 4
+    assert not failed.recall_correct and not failed.context_correct and failed.quality == 1

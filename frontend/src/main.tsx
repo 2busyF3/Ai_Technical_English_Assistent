@@ -5,6 +5,7 @@ import { BrowserRouter } from "react-router-dom";
 import App from "./App";
 import { ErrorBoundary } from "./ErrorBoundary";
 import "./styles.css";
+import "./vocabulary.css";
 
 const client = new QueryClient({defaultOptions:{queries:{staleTime:30_000,retry:1}}});
 ReactDOM.createRoot(document.getElementById("root")!).render(
