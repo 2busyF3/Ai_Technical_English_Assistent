@@ -1,0 +1,52 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "technical-english-tutor"
+version = "0.1.0"
+description = "Adaptive AI Technical English Tutor backend"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.30",
+  "sqlalchemy[asyncio]>=2.0.36",
+  "asyncpg>=0.30",
+  "aiosqlite>=0.20",
+  "alembic>=1.14",
+  "pydantic-settings>=2.6",
+  "email-validator>=2.2",
+  "pwdlib[argon2]>=0.2",
+  "PyJWT>=2.10",
+  "python-multipart>=0.0.17",
+  "httpx>=0.28",
+  "openai>=1.57",
+  "langgraph>=0.2.60",
+  "redis>=5.2",
+  "dramatiq[redis]>=1.17",
+  "pypdf>=5.1",
+  "structlog>=24.4",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.3", "pytest-asyncio>=0.24"]
+quality = ["ruff>=0.8", "mypy>=1.13"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.12"
+plugins = ["pydantic.mypy"]
+ignore_missing_imports = true
