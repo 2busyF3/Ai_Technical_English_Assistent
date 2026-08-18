@@ -120,9 +120,18 @@ class LearningService:
         return self.lesson_payload(active)
 
     async def submit(self, db: AsyncSession, user: User, lesson: LessonSession, answer: str) -> dict:
-        exercise = LESSON_EXERCISES[min(lesson.exercise_index, len(LESSON_EXERCISES)-1)]
+        exercise_index = self._current_exercise_index(lesson)
+        if exercise_index is None:
+            raise ValueError("Lesson has no remaining exercises")
+        exercise = LESSON_EXERCISES[exercise_index]
         if exercise["answer"]:
             score = 1.0 if answer.strip().lower() == exercise["answer"].lower() else .45
+            if score < .7:
+                errors = {
+                    0: {"error_type":"incorrect-preposition","original":answer,"corrected":exercise["answer"],"explanation":"Use ‘deploy to production’ as the standard IT collocation."},
+                    1: {"error_type":"present-perfect-vs-past-simple","original":answer,"corrected":exercise["answer"],"explanation":"Use Past Simple with a finished time marker such as ‘yesterday’."},
+                }
+                await self._save_error(db, user.id, errors.get(exercise_index, {"error_type":"exercise-error","original":answer,"corrected":exercise["answer"],"explanation":"Review the target language pattern."}))
         else:
             evaluation = await self.mock.generate_structured([{"role":"user","content":answer}], __import__("app.schemas", fromlist=["EvaluationResult"]).EvaluationResult)
             score = (evaluation.technical_correctness + evaluation.grammar_accuracy + evaluation.clarity) / 3
@@ -134,9 +143,16 @@ class LearningService:
             state.confidence = min(.95, state.confidence + .06)
             state.attempts += 1
             state.last_practiced_at = datetime.now(timezone.utc)
+        working_summary = dict(lesson.summary or {})
+        retry_queue = list(working_summary.get("retry_queue", []))
+        is_initial_pass = lesson.exercise_index < len(LESSON_EXERCISES)
+        if score < .7 and is_initial_pass and exercise_index not in retry_queue:
+            retry_queue.append(exercise_index)
+        working_summary["retry_queue"] = retry_queue
+        lesson.summary = working_summary
         lesson.score += score
         lesson.exercise_index += 1
-        completed = lesson.exercise_index >= len(LESSON_EXERCISES)
+        completed = lesson.exercise_index >= len(LESSON_EXERCISES) + len(retry_queue)
         if completed:
             lesson.status = "completed"
             lesson.completed_at = datetime.now(timezone.utc)
@@ -146,13 +162,30 @@ class LearningService:
                 profile.streak += 1
                 profile.total_minutes += profile.daily_learning_minutes
         await db.commit()
-        feedback = "Strong answer — your technical meaning is clear." if score >= .75 else "Good direction. Make the time reference and technical impact more precise."
-        return {"completed": completed, "score": round(score, 2), "feedback": feedback, "lesson": self.lesson_payload(lesson)}
+        if score >= .75:
+            feedback = "Strong answer — your technical meaning is clear."
+        elif is_initial_pass:
+            feedback = "Good direction. I’ve added this pattern to a short review at the end of the lesson."
+        else:
+            feedback = "This was your review attempt. Check the correction in your lesson summary and Error Memory."
+        return {"completed": completed, "score": round(score, 2), "feedback": feedback, "requeued": score < .7 and is_initial_pass, "lesson": self.lesson_payload(lesson)}
 
     @staticmethod
-    def lesson_payload(lesson: LessonSession) -> dict:
-        exercise = None if lesson.status == "completed" else LESSON_EXERCISES[min(lesson.exercise_index, len(LESSON_EXERCISES)-1)]
-        return {"id":lesson.id,"title":lesson.title,"status":lesson.status,"step":lesson.exercise_index,"total_steps":len(LESSON_EXERCISES),"objective":"Explain past performance improvements with accurate technical vocabulary.","context":"You are answering questions in a backend interview about an API you improved.","exercise":exercise,"summary":lesson.summary}
+    def _current_exercise_index(lesson: LessonSession) -> int | None:
+        if lesson.exercise_index < len(LESSON_EXERCISES):
+            return lesson.exercise_index
+        retry_queue = list((lesson.summary or {}).get("retry_queue", []))
+        retry_position = lesson.exercise_index - len(LESSON_EXERCISES)
+        return retry_queue[retry_position] if retry_position < len(retry_queue) else None
+
+    @classmethod
+    def lesson_payload(cls, lesson: LessonSession) -> dict:
+        retry_queue = list((lesson.summary or {}).get("retry_queue", []))
+        exercise_index = cls._current_exercise_index(lesson)
+        exercise = None if lesson.status == "completed" or exercise_index is None else dict(LESSON_EXERCISES[exercise_index])
+        if exercise is not None:
+            exercise["is_review"] = lesson.exercise_index >= len(LESSON_EXERCISES)
+        return {"id":lesson.id,"title":lesson.title,"status":lesson.status,"step":lesson.exercise_index,"total_steps":len(LESSON_EXERCISES)+len(retry_queue),"objective":"Explain past performance improvements with accurate technical vocabulary.","context":"You are answering questions in a backend interview about an API you improved.","exercise":exercise,"summary":lesson.summary}
 
     @staticmethod
     async def _save_error(db: AsyncSession, user_id: str, error: dict) -> None:
@@ -162,4 +195,3 @@ class LearningService:
             item.last_seen_at = datetime.now(timezone.utc)
         else:
             db.add(UserError(user_id=user_id, skill_id="grammar.present-perfect", error_type=error["error_type"], original_fragment=error["original"], corrected_fragment=error["corrected"], explanation=error["explanation"], confidence=.86))
-

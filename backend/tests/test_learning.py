@@ -3,6 +3,8 @@ from datetime import datetime, timezone
 from app.ai.context import ContextBuilder, TutorContext
 from app.domain.learning import MasteryService, PlacementEngine, PriorityInput, PersonalizationEngine, SRSService, SRSState
 from app.rag.retrieval import Candidate, HybridRetriever, RetrievalQuery
+from app.application import LearningService
+from app.models import LessonSession
 
 
 def test_personalization_prioritizes_weak_relevant_skill() -> None:
@@ -59,3 +61,12 @@ def test_hybrid_retrieval_applies_metadata_and_exact_terms() -> None:
     result = HybridRetriever().rank(RetrievalQuery("cache invalidation", {"OFFICIAL_DOCUMENTATION"}, "BACKEND"), candidates, [1,0])
     assert len(result) == 1 and "Cache invalidation" in result[0].content
 
+
+def test_lesson_replays_failed_exercise_after_initial_pass() -> None:
+    lesson = LessonSession(user_id="user", skill_id="tech.caching", title="Test")
+    lesson.exercise_index = 3
+    lesson.summary = {"retry_queue":[1]}
+    assert LearningService._current_exercise_index(lesson) == 1
+    payload = LearningService.lesson_payload(lesson)
+    assert payload["total_steps"] == 4
+    assert payload["exercise"]["is_review"] is True

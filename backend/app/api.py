@@ -128,7 +128,10 @@ async def answer_lesson(lesson_id: str, data: ExerciseAnswer, user: User = Depen
         raise HTTPException(404, "Lesson not found")
     if lesson.status != "active":
         raise HTTPException(409, "Lesson is already completed")
-    return await learning_service.submit(db, user, lesson, data.answer)
+    try:
+        return await learning_service.submit(db, user, lesson, data.answer)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 @router.get("/vocabulary")
