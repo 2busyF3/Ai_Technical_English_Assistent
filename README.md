@@ -49,38 +49,48 @@ PostgreSQL with the pgvector extension is the deployment database. Knowledge chu
 
 The unused LangGraph façade was removed. Placement and lesson workflows are ordinary application services because they are finite, transaction-heavy state machines; adding a graph framework there would add indirection without providing durable orchestration value.
 
-## Local setup
+## Start with Docker and just
 
-Prerequisites: Python 3.12+ and Node 20+.
+The supported development path uses Docker Compose for every application service. Host Python and Node.js are not required. Install Docker Desktop and the [`just`](https://just.systems/) task runner.
 
-```bash
-cp .env.example .env
+On Windows:
 
-cd backend
-python -m venv .venv
-# Windows: .venv\Scripts\activate
-# macOS/Linux: source .venv/bin/activate
-pip install -e ".[dev,quality]"
-python -m app.cli.migrate
-uvicorn app.main:app --reload
-
-# second terminal
-cd frontend
-npm install
-npm run dev
+```powershell
+winget install --id Casey.Just --exact
 ```
 
-Open `http://localhost:5173`. API docs are at `http://localhost:8000/api/docs`.
+Restart the terminal after the first installation, then run from the repository root:
 
-## Docker
-
-Copy `.env.example` to `.env` and set a non-default `SECRET_KEY`, then run:
-
-```bash
-docker compose up --build
+```powershell
+just doctor
+just up
 ```
 
-The application is served at `http://localhost:5173`; the Docker API is at `http://localhost:8001` (container port `8000`).
+`just up` validates Compose, builds changed images, starts PostgreSQL, Redis, backend, worker, and frontend, and waits for health checks. Migrations run inside the backend container before Uvicorn starts.
+
+The application is available at `http://localhost:5173`; API docs are at `http://localhost:8001/api/docs`.
+
+An `.env` file is optional for infrastructure startup. Copy `.env.example` to `.env` when configuring real OpenAI access or overriding defaults:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+Common commands:
+
+```text
+just up              build and start the complete stack
+just resume          start existing images without rebuilding
+just restart         recreate the stack after code changes
+just stop            stop containers without removing them
+just down            remove containers but preserve database volumes
+just ps              show container health
+just logs backend    follow backend logs
+just test            run backend tests in an isolated Docker image
+just check           run backend tests and build the frontend
+```
+
+The direct fallback is `docker compose up --detach --build --wait`. Do not use `docker compose down --volumes` unless deleting PostgreSQL and Redis data is intentional.
 
 ## Environment variables
 
@@ -140,18 +150,10 @@ The administrator-only `POST /api/v1/knowledge/ingest` endpoint accepts UTF-8 te
 ## Validation
 
 ```bash
-cd backend
-pip install -e ".[dev,quality]"
-pytest -q
-ruff check .
-mypy app
-
-cd ../frontend
-npm run build
-
-cd ..
-powershell -File scripts/acceptance.ps1
+just check
 ```
+
+With the stack running and a real AI key configured, the extended acceptance checks remain available through `powershell -File scripts/acceptance.ps1` and `powershell -File scripts/openai-smoke.ps1`.
 
 Tests do not call a paid AI provider. They cover personalization, mastery, SRS, placement ordering, AI-evaluation policy, curriculum retries, vocabulary scoring, API authorization boundaries, duplicate accounts, rotating refresh tokens, knowledge parsing, and cross-user isolation. The acceptance script exercises the running Docker application; real tutor and free-answer acceptance requires a configured server-side OpenAI key.
 
